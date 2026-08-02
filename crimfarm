@@ -67,9 +67,14 @@ do
             pcall(function() InvisAnimTrack:Stop() end)
             InvisAnimTrack = nil
         end
-        if humanoid then
-            local success, track = pcall(function() return humanoid:LoadAnimation(InvisAnim) end)
-            if success then
+        if humanoid and humanoid:IsDescendantOf(workspace) then
+            local animator = humanoid:FindFirstChildOfClass("Animator")
+            if not animator then
+                animator = Instance.new("Animator")
+                animator.Parent = humanoid
+            end
+            local success, track = pcall(function() return animator:LoadAnimation(InvisAnim) end)
+            if success and track then
                 InvisAnimTrack = track
                 InvisAnimTrack.Priority = Enum.AnimationPriority.Action4
             else
@@ -201,7 +206,7 @@ do
         local originalCamOffset = humanoid.CameraOffset
         local _, cameraYaw = workspace.CurrentCamera.CFrame:ToOrientation()
 
-        hrp.CFrame = CFrame.new(hrp.CFrame.Position) * CFrame.fromOrientation(0, cameraYaw, 0)
+        hrp.CFrame = CFrame.new(hrp.CFrame.Position) * CFrame.Angles(0, cameraYaw, 0)
         hrp.CFrame = hrp.CFrame * CFrame.Angles(math.rad(90), 0, 0)
         humanoid.CameraOffset = Vector3.new(0, 1.44, 0)
 
