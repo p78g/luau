@@ -1,41 +1,303 @@
--- Spam the E key but stop early if the ShelfAssigned remote fires
-local function SpamProximityPromptUntilAssigned()
-    Log("Spamming proximity prompt until ShelfAssigned fires...")
-    local attempts = 0
-    local maxAttempts = 100       -- safety timeout (100 pulses ~ 50 seconds)
-    while assignedShelf == nil and attempts < maxAttempts do
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, nil)
-        task.wait(PROMPT_HOLD_TIME)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
-        task.wait(PROMPT_GAP)
-        attempts = attempts + 1
-        if assignedShelf ~= nil then
-            Log("ShelfAssigned received, stopping spam")
-            break
-        end
-    end
-    if assignedShelf == nil then
-        Log("Warning: ShelfAssigned never fired after " .. maxAttempts .. " attempts")
+-- ==========================================
+-- SHELF BOT — full rewrite against provided movement stack
+-- ==========================================
+
+local RunService        = game:GetService("RunService")
+local Players           = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local TweenService      = game:GetService("TweenService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local Character, Humanoid, HRP
+
+-- ── Config ────────────────────────────────
+local FIXED_POSITION  = Vector3.new(-515, 199, 141)
+local PROMPT_HOLD_TIME = 0.3
+local PROMPT_GAP       = 0.2
+local MOVE_SPEED       = 22
+local WAYPOINT_SPACING = 3
+local MAX_PROMPT_ATTEMPTS = 100
+local DEBUG = true
+
+-- ── State ─────────────────────────────────
+local assignedShelf     = nil
+local shelfSignal       = Instance.new("BindableEvent")  -- fires when remote delivers a shelf
+
+-- ── Remote wiring ─────────────────────────
+-- ShelfAssigned fires with the assigned shelf instance
+local ShelfAssignedEvent = ReplicatedStorage:WaitForChild("ShelfAssigned")
+ShelfAssignedEvent.OnClientEvent:Connect(function(shelf)
+    assignedShelf = shelf
+    shelfSignal:Fire(shelf)
+    Log("ShelfAssigned received: " .. tostring(shelf and shelf:GetFullName()))
+end)
+
+-- ── Logging ───────────────────────────────
+local function Log(msg)
+    if DEBUG then
+        print("[ShelfBot]", msg)
     end
 end
 
--- Main loop (revised step 2 and 3)
+-- ── Path visualiser (matches source script) ──
+local PathVisualsFolder = Instance.new("Folder")
+PathVisualsFolder.Name  = "ShelfBotPathVisuals"
+PathVisualsFolder.Parent = workspace
+
+local function ClearPathVisuals()
+    for _, c in ipairs(PathVisualsFolder:GetChildren()) do
+        pcall(c.Destroy, c)
+    end
+end
+
+local function VisualizePath(waypoints, startPos)
+    ClearPathVisuals()
+    if not waypoints or #waypoints == 0 then return end
+    local prevPos = startPos
+    for i, wp in ipairs(waypoints) do
+        local part       = Instance.new("Part")
+        part.Size        = Vector3.new(0.6, 0.6, 0.6)
+        part.Position    = wp.Position
+        part.Anchored    = true
+        part.CanCollide  = false
+        part.Material    = Enum.Material.Neon
+        part.Color       = Color3.fromHSV(i / #waypoints, 1, 1)
+        part.Transparency = 0.3
+        part.Parent      = PathVisualsFolder
+
+        local dist = (wp.Position - prevPos).Magnitude
+        if dist > 0.5 then
+            local line         = Instance.new("Part")
+            line.Anchored      = true
+            line.CanCollide    = false
+            line.Material      = Enum.Material.Neon
+            line.Color         = Color3.new(0, 1, 0)
+            line.Transparency  = 0.5
+            line.Size          = Vector3.new(0.3, 0.3, dist)
+            line.CFrame        = CFrame.lookAt(prevPos + (wp.Position - prevPos) / 2, wp.Position)
+            line.Parent        = PathVisualsFolder
+        end
+        prevPos = wp.Position
+    end
+end
+
+-- ── Pathfinding (identical param cascade to source) ──
+local PATH_PARAMS = {
+    { Radius = 1,   Height = 4,   Spacing = 2   },
+    { Radius = 1.2, Height = 4.5, Spacing = 2.5 },
+    { Radius = 1.5, Height = 5,   Spacing = 3   },
+    { Radius = 2,   Height = 5.5, Spacing = 4   },
+    { Radius = 2.5, Height = 6,   Spacing = 5   },
+    { Radius = 3,   Height = 6.5, Spacing = 5   },
+    { Radius = 3.5, Height = 7,   Spacing = 6   },
+    { Radius = 4,   Height = 7.5, Spacing = 6   },
+    { Radius = 1,   Height = 8,   Spacing = 3   },
+    { Radius = 5,   Height = 5,   Spacing = 5   },
+}
+
+local function ComputePath(startPos, endPos)
+    for _, p in ipairs(PATH_PARAMS) do
+        local path = PathfindingService:CreatePath({
+            AgentRadius    = p.Radius,
+            AgentHeight    = p.Height,
+            AgentCanJump   = true,
+            AgentCanClimb  = true,
+            WaypointSpacing = p.Spacing,
+        })
+        local ok = pcall(function() path:ComputeAsync(startPos, endPos) end)
+        if ok and path.Status == Enum.PathStatus.Success then
+            local raw = path:GetWaypoints()
+            if not raw or #raw < 2 then return raw end
+            -- refine spacing
+            local refined = { raw[1] }
+            for i = 2, #raw do
+                local prev = raw[i - 1].Position
+                local curr = raw[i].Position
+                local dist = (curr - prev).Magnitude
+                if dist <= WAYPOINT_SPACING then
+                    table.insert(refined, raw[i])
+                else
+                    local steps = math.ceil(dist / WAYPOINT_SPACING)
+                    for j = 1, steps do
+                        local alpha = j / steps
+                        table.insert(refined, {
+                            Position = prev:Lerp(curr, alpha),
+                            Action   = j == steps and raw[i].Action or Enum.PathWaypointAction.Walk
+                        })
+                    end
+                end
+            end
+            return refined
+        end
+        task.wait(0.05)
+    end
+    return nil
+end
+
+-- ── Movement primitives ───────────────────
+local function GetFootPosition()
+    return HRP and (HRP.Position - Vector3.new(0, 2.5, 0)) or nil
+end
+
+-- Move HRP along a computed path to endPos.
+-- Returns true on success, false on failure.
+local function MoveToPosition(endPos)
+    if not HRP or not Humanoid then return false end
+    local startPos = HRP.Position
+    local path     = ComputePath(startPos, endPos)
+    if not path then
+        Log("Path not found to " .. tostring(endPos))
+        return false
+    end
+    Log("Path found, waypoints: " .. #path)
+    VisualizePath(path, startPos)
+
+    for _, waypoint in ipairs(path) do
+        local foot = GetFootPosition()
+        if not foot then continue end
+        local targetHRP = waypoint.Position + Vector3.new(0, 2.5, 0)
+        local dist      = (targetHRP - HRP.Position).Magnitude
+        if dist > 0.2 then
+            local rot     = HRP.CFrame - HRP.CFrame.Position
+            local targetCF = CFrame.new(targetHRP) * rot
+            local tween   = TweenService:Create(
+                HRP,
+                TweenInfo.new(dist / MOVE_SPEED, Enum.EasingStyle.Linear),
+                { CFrame = targetCF }
+            )
+            tween:Play()
+            tween.Completed:Wait()
+        end
+        if waypoint.Action == Enum.PathWaypointAction.Jump then
+            Humanoid.Jump = true
+            task.wait(0.1)
+        end
+    end
+
+    ClearPathVisuals()
+
+    -- snap to final position
+    local rot = HRP.CFrame - HRP.CFrame.Position
+    HRP.CFrame = CFrame.new(endPos + Vector3.new(0, 2.5, 0)) * rot
+    HRP.AssemblyLinearVelocity = Vector3.zero
+    HRP.AssemblyAngularVelocity = Vector3.zero
+    Log("Reached: " .. tostring(endPos))
+    return true
+end
+
+-- Walk up to a BasePart (front-face offset mirrors source MoveToTarget logic)
+local function MoveToPart(part)
+    if not part or not part:IsA("BasePart") then return false end
+    local cf       = part.CFrame
+    local look     = cf.LookVector
+    look = Vector3.new(look.X, 0, look.Z)
+    if look.Magnitude < 0.1 then
+        look = (HRP.Position - cf.Position)
+        look = Vector3.new(look.X, 0, look.Z)
+        if look.Magnitude < 0.1 then look = Vector3.new(1, 0, 0) end
+    end
+    look = look.Unit
+    local target = cf.Position + look * 4
+    return MoveToPosition(target)
+end
+
+-- ── Shelf routing table ───────────────────
+-- Maps the shelf instance the remote sends to its Hitbox.
+-- Handles both indexed children and named children.
+local StockShelves = workspace:WaitForChild("StockShelves")
+
+local function ResolveHitbox(shelf)
+    if not shelf then return nil end
+    local hitbox = shelf:FindFirstChild("Hitbox")
+    if hitbox and hitbox:IsA("BasePart") then
+        return hitbox
+    end
+    Log("Shelf " .. tostring(shelf:GetFullName()) .. " has no valid Hitbox")
+    return nil
+end
+
+-- ── Proximity prompt spam ─────────────────
+local function SpamProximityPromptUntilAssigned()
+    Log("Spamming E until ShelfAssigned fires...")
+    assignedShelf = nil  -- cleared at call site already; belt-and-suspenders
+
+    local resolved   = false
+    local connection
+    connection = shelfSignal.Event:Connect(function()
+        resolved = true
+        connection:Disconnect()
+        connection = nil
+    end)
+
+    local attempts = 0
+    while not resolved and attempts < MAX_PROMPT_ATTEMPTS do
+        VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.E, false, nil)
+        task.wait(PROMPT_HOLD_TIME)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
+        task.wait(PROMPT_GAP)
+        attempts += 1
+    end
+
+    if connection then
+        connection:Disconnect()
+        connection = nil
+    end
+
+    if not resolved then
+        Log("Warning: ShelfAssigned never fired after " .. attempts .. " attempts")
+    else
+        Log("ShelfAssigned received after " .. attempts .. " prompt(s)")
+    end
+end
+
+-- ── Closest enabled ProximityPrompt ───────
+local function GetClosestPromptPart()
+    if not HRP then return nil end
+    local best, bestDist = nil, math.huge
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") and desc.Enabled then
+            local parent = desc.Parent
+            if parent and parent:IsA("BasePart") then
+                local d = (parent.Position - HRP.Position).Magnitude
+                if d < bestDist then
+                    bestDist = d
+                    best     = parent
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- ── Character resolution ──────────────────
+local function UpdateCharacter()
+    Character = LocalPlayer.Character
+    if Character then
+        Humanoid = Character:FindFirstChildOfClass("Humanoid")
+        HRP      = Character:FindFirstChild("HumanoidRootPart")
+    else
+        Humanoid, HRP = nil, nil
+    end
+end
+
+-- ── Main loop ─────────────────────────────
 local function MainLoop()
     while true do
-        -- Ensure character is alive
+        -- wait for a live character
         repeat
-            Character = LocalPlayer.Character
-            if Character then
-                Humanoid = Character:FindFirstChildOfClass("Humanoid")
-                HRP = Character:FindFirstChild("HumanoidRootPart")
-            end
+            UpdateCharacter()
             task.wait(0.5)
         until Character and Humanoid and HRP and Humanoid.Health > 0
 
         Log("=== New cycle ===")
 
-        -- Step 1: Move to fixed position
-        Log("Moving to fixed position: " .. tostring(FIXED_POSITION))
+        -- reset shelf state at the top of every cycle
+        assignedShelf = nil
+
+        -- 1. Move to the fixed kiosk position
+        Log("Moving to fixed position " .. tostring(FIXED_POSITION))
         if not MoveToPosition(FIXED_POSITION) then
             Log("Failed to reach fixed position, retrying in 3s")
             task.wait(3)
@@ -43,49 +305,56 @@ local function MainLoop()
         end
         Log("Arrived at fixed position")
 
-        -- Step 2: Move to the nearest ProximityPrompt's part
+        -- 2. Find and approach the nearest ProximityPrompt
         local promptPart = GetClosestPromptPart()
-        if promptPart then
-            Log("Closest prompt found at: " .. promptPart:GetFullName())
-            MoveToPart(promptPart)
-            task.wait(0.5)
-        else
-            Log("No enabled ProximityPrompt available, retrying cycle")
+        if not promptPart then
+            Log("No enabled ProximityPrompt found, retrying in 2s")
             task.wait(2)
             continue
         end
+        Log("Prompt found at " .. promptPart:GetFullName())
+        MoveToPart(promptPart)
+        task.wait(0.5)
 
-        -- Step 3: Spam the prompt and listen for the remote at the same time
-        assignedShelf = nil  -- Reset
+        -- 3. Spam E until the remote fires
         SpamProximityPromptUntilAssigned()
 
-        -- After spamming, if still no shelf assigned, retry the whole cycle
-        if assignedShelf == nil then
-            Log("No shelf assigned, retrying cycle in 3 seconds")
+        -- 4. Single authoritative nil guard
+        if not assignedShelf then
+            Log("No shelf assigned after prompt spam, retrying cycle in 3s")
             task.wait(3)
             continue
         end
 
-        -- Step 4: Move to the assigned shelf's Hitbox
-        local shelf = assignedShelf
-        local hitbox = shelf and shelf:FindFirstChild("Hitbox")
-        if not hitbox or not hitbox:IsA("BasePart") then
-            Log("Assigned shelf does not have a valid Hitbox, skipping cycle")
+        -- 5. Resolve Hitbox from assigned shelf
+        local shelf  = assignedShelf   -- capture; remote could theoretically fire again
+        local hitbox = ResolveHitbox(shelf)
+        if not hitbox then
+            Log("Could not resolve Hitbox for assigned shelf, skipping cycle")
             task.wait(2)
             continue
         end
 
-        Log("Moving to assigned shelf's Hitbox: " .. hitbox:GetFullName())
+        Log("Moving to Hitbox: " .. hitbox:GetFullName())
         if not MoveToPart(hitbox) then
-            Log("Failed to reach Hitbox, retrying cycle")
+            Log("Failed to reach Hitbox, retrying cycle in 2s")
             task.wait(2)
             continue
         end
 
-        -- Step 5: Wait 4 seconds at the Hitbox
-        Log("Reached Hitbox, waiting 4 seconds...")
+        -- 6. Dwell at hitbox
+        Log("Reached Hitbox — waiting 4 seconds")
         task.wait(4)
 
-        Log("Cycle complete, restarting")
+        Log("Cycle complete")
+        -- loop repeats immediately
     end
 end
+
+Log("Shelf Bot started")
+UpdateCharacter()
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    UpdateCharacter()
+end)
+MainLoop()
