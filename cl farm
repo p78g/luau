@@ -1,6 +1,11 @@
 --[[
-    Auto Shelf Pad + Proximity Prompt Loop
-    Uses pathfinding movement, now targets the nearest ProximityPrompt
+    Auto Shelf + Prompt Loop (Revised Order)
+    1. Move to fixed position (-514,199,140)
+    2. Spam nearest ProximityPrompt
+    3. Check StockShelves pads for first visible Hitbox
+    4. Move to Hitbox
+    5. Wait 4 seconds
+    6. Repeat
 --]]
 
 -- Services
@@ -17,9 +22,17 @@ local Humanoid = Character:WaitForChild("Humanoid")
 local HRP = Character:WaitForChild("HumanoidRootPart")
 
 -- Movement settings
-local MOVE_SPEED = 22
+local MOVE_SPEED = 30
 local WAYPOINT_SPACING = 3
 local TWEEN_TIMEOUT = 30
+
+-- Prompt spam settings
+local PROMPT_SPAM_ATTEMPTS = 10
+local PROMPT_HOLD_TIME = 0.3
+local PROMPT_GAP = 0.2
+
+-- Fixed coordinates to visit each cycle
+local FIXED_POSITION = Vector3.new(-514, 199, 140)
 
 local function Log(msg)
     print("[ShelfBot]", msg)
@@ -29,6 +42,7 @@ local function GetFootPosition()
     return HRP.Position - Vector3.new(0, 2.5, 0)
 end
 
+-- Pathfinding (tries multiple agent sizes)
 local function ComputePath(startPos, endPos)
     local paramSets = {
         {Radius = 1,   Height = 4,   Spacing = 2},
@@ -47,7 +61,6 @@ local function ComputePath(startPos, endPos)
         {Radius = 3.2, Height = 6.8, Spacing = 5.8},
         {Radius = 3.8, Height = 7.2, Spacing = 6.2},
     }
-
     for _, params in ipairs(paramSets) do
         local pathParams = {
             AgentRadius = params.Radius,
@@ -89,13 +102,17 @@ end
 
 local function MoveToPosition(targetPos)
     local footPos = GetFootPosition()
-    if (targetPos - footPos).Magnitude < 0.5 then return true end
+    if (targetPos - footPos).Magnitude < 0.5 then
+        Log("Already at target")
+        return true
+    end
     Log("Computing path to " .. tostring(targetPos))
     local path = ComputePath(footPos, targetPos)
     if not path then
         Log("Path not found")
         return false
     end
+    Log("Moving along " .. #path .. " waypoints")
     local startTime = tick()
     for _, waypoint in ipairs(path) do
         if not HRP or not HRP.Parent or Humanoid.Health <= 0 then return false end
@@ -125,10 +142,18 @@ local function MoveToPart(part)
     return MoveToPosition(part.Position)
 end
 
-local function HoldE(duration)
-    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, nil)
-    task.wait(duration)
-    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
+-- Spam the E key to trigger ProximityPrompt even if obstructed
+local function SpamProximityPrompt()
+    Log("Spamming proximity prompt (" .. PROMPT_SPAM_ATTEMPTS .. " pulses)")
+    for i = 1, PROMPT_SPAM_ATTEMPTS do
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, nil)
+        task.wait(PROMPT_HOLD_TIME)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
+        if i < PROMPT_SPAM_ATTEMPTS then
+            task.wait(PROMPT_GAP)
+        end
+    end
+    Log("Prompt spam finished")
 end
 
 -- Find the closest enabled ProximityPrompt and return its parent part
@@ -138,10 +163,12 @@ local function GetClosestPromptPart()
         if prompt:IsA("ProximityPrompt") and prompt.Enabled then
             local parent = prompt.Parent
             if parent then
-                -- Get a BasePart to move to (the prompt's parent itself if it's a part, or the first child part)
                 local part = parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart")
                 if part then
-                    table.insert(prompts, {prompt = prompt, part = part, distance = (HRP.Position - part.Position).Magnitude})
+                    table.insert(prompts, {
+                        part = part,
+                        distance = (HRP.Position - part.Position).Magnitude
+                    })
                 end
             end
         end
@@ -151,8 +178,53 @@ local function GetClosestPromptPart()
     return prompts[1].part
 end
 
+-- Check the 4 specific shelf pads and return the first visible Hitbox
+local function GetFirstVisibleShelfHitbox()
+    local shelfFolder = Workspace:FindFirstChild("StockShelves")
+    if not shelfFolder then
+        Log("StockShelves not found")
+        return nil
+    end
+
+    local padPaths = {
+        {"GetChildren", 3},   -- GetChildren()[3]
+        {"GetChildren", 2},   -- GetChildren()[2]
+        {"ShelfStock"},       -- ShelfStock
+        {"GetChildren", 4},   -- GetChildren()[4]
+    }
+
+    for _, pathData in ipairs(padPaths) do
+        local parentFolder
+        if type(pathData[1]) == "string" then
+            parentFolder = shelfFolder:FindFirstChild(pathData[1])
+        else
+            local children = shelfFolder:GetChildren()
+            local idx = pathData[2]
+            if idx and #children >= idx then
+                parentFolder = children[idx]
+            end
+        end
+
+        if parentFolder then
+            local pad = parentFolder:FindFirstChild("Pad")
+            if pad and pad:IsA("BasePart") and pad.Transparency < 0.99 then
+                local hitbox = parentFolder:FindFirstChild("Hitbox")
+                if hitbox and hitbox:IsA("BasePart") then
+                    Log("Visible pad found in: " .. parentFolder.Name)
+                    return hitbox
+                end
+            end
+        end
+    end
+
+    Log("No visible pads with Hitbox found")
+    return nil
+end
+
+-- Main loop (revised order)
 local function MainLoop()
     while true do
+        -- Ensure character is alive and loaded
         repeat
             Character = LocalPlayer.Character
             if Character then
@@ -162,95 +234,53 @@ local function MainLoop()
             task.wait(0.5)
         until Character and Humanoid and HRP and Humanoid.Health > 0
 
-        Log("Starting new cycle")
+        Log("=== New cycle ===")
 
-        local shelfFolder = Workspace:FindFirstChild("StockShelves")
-        if not shelfFolder then
-            Log("StockShelves not found, retrying in 5s")
-            task.wait(5)
+        -- Step 1: Move to fixed coordinates
+        Log("Moving to fixed position: " .. tostring(FIXED_POSITION))
+        local success = MoveToPosition(FIXED_POSITION)
+        if not success then
+            Log("Failed to reach fixed position, retrying in 3s")
+            task.wait(3)
             continue
         end
+        Log("Arrived at fixed position")
 
-        -- Pad checking (same as before)
-        local padPaths = {
-            {"GetChildren", 3},
-            {"GetChildren", 2},
-            {"ShelfStock"},
-            {"GetChildren", 4},
-        }
-        local targetHitbox = nil
-
-        for _, pathData in ipairs(padPaths) do
-            local parentFolder
-            if type(pathData[1]) == "string" then
-                parentFolder = shelfFolder:FindFirstChild(pathData[1])
-            else
-                local children = shelfFolder:GetChildren()
-                local idx = pathData[2]
-                if idx and #children >= idx then
-                    parentFolder = children[idx]
-                end
-            end
-
-            if parentFolder then
-                local pad = parentFolder:FindFirstChild("Pad")
-                if pad and pad:IsA("BasePart") then
-                    if pad.Transparency < 0.99 then
-                        local hitbox = parentFolder:FindFirstChild("Hitbox")
-                        if hitbox and hitbox:IsA("BasePart") then
-                            targetHitbox = hitbox
-                            Log("Visible pad found in: " .. parentFolder.Name)
-                            break
-                        end
-                    end
-                end
-            end
-        end
-
-        if not targetHitbox then
-            Log("No visible pad, retrying in 5s")
-            task.wait(5)
-            continue
-        end
-
-        -- Move to hitbox
-        if not MoveToPart(targetHitbox) then
-            Log("Failed to reach hitbox, retrying")
-            task.wait(2)
-            continue
-        end
-
-        Log("Reached hitbox, waiting 6 seconds...")
-        task.wait(6)
-
-        -- Move to fixed coordinates
-        local fixedPos = Vector3.new(-514, 199, 140)
-        Log("Moving to fixed coordinates")
-        if not MoveToPosition(fixedPos) then
-            Log("Failed to reach fixed pos, retrying")
-            task.wait(2)
-            continue
-        end
-
-        Log("Reached fixed position, waiting 1 second...")
-        task.wait(1)
-
-        -- Interact with the CLOSEST ProximityPrompt
+        -- Step 2: Spam the nearest ProximityPrompt
         local promptPart = GetClosestPromptPart()
         if promptPart then
-            Log("Closest prompt part: " .. promptPart:GetFullName())
-            MoveToPart(promptPart)
-            task.wait(0.5)
-            Log("Holding E to trigger prompt for 2 seconds")
-            HoldE(2)
+            Log("Closest prompt found at: " .. promptPart:GetFullName())
+            MoveToPart(promptPart)   -- Move right onto it
+            task.wait(0.5)           -- settle
+            SpamProximityPrompt()
         else
-            Log("No enabled ProximityPrompt found")
+            Log("No enabled ProximityPrompt available")
         end
 
-        Log("Cycle complete, restarting in 2s")
-        task.wait(2)
+        -- Step 3: Check shelves for a visible pad
+        local hitbox = GetFirstVisibleShelfHitbox()
+        if not hitbox then
+            Log("No visible shelf pad, waiting 3s before restarting cycle")
+            task.wait(3)
+            continue
+        end
+
+        -- Step 4: Move to the Hitbox
+        Log("Moving to hitbox: " .. hitbox:GetFullName())
+        success = MoveToPart(hitbox)
+        if not success then
+            Log("Failed to reach hitbox, retrying cycle")
+            task.wait(2)
+            continue
+        end
+
+        -- Step 5: Wait 4 seconds at the Hitbox
+        Log("Reached hitbox, waiting 4 seconds...")
+        task.wait(4)
+
+        Log("Cycle complete, restarting")
     end
 end
 
-Log("Shelf Bot started")
+Log("Shelf Bot started (revised order)")
 MainLoop()
