@@ -1,9 +1,9 @@
 --[[
-    Auto Shelf + Prompt Loop (Revised Order)
+    Auto Shelf + Prompt Loop (Remote-Driven)
     1. Move to fixed position (-514,199,140)
     2. Spam nearest ProximityPrompt
-    3. Check StockShelves pads for first visible Hitbox
-    4. Move to Hitbox
+    3. Wait for "ShelfAssigned" remote to fire
+    4. Move to the assigned shelf's Hitbox
     5. Wait 4 seconds
     6. Repeat
 --]]
@@ -12,6 +12,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local PathfindingService = game:GetService("PathfindingService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
@@ -22,7 +23,7 @@ local Humanoid = Character:WaitForChild("Humanoid")
 local HRP = Character:WaitForChild("HumanoidRootPart")
 
 -- Movement settings
-local MOVE_SPEED = 30
+local MOVE_SPEED = 22
 local WAYPOINT_SPACING = 3
 local TWEEN_TIMEOUT = 30
 
@@ -31,8 +32,23 @@ local PROMPT_SPAM_ATTEMPTS = 10
 local PROMPT_HOLD_TIME = 0.3
 local PROMPT_GAP = 0.2
 
--- Fixed coordinates to visit each cycle
+-- Fixed coordinates
 local FIXED_POSITION = Vector3.new(-514, 199, 140)
+
+-- Remote event to listen for shelf assignments
+local ShelfAssignedEvent = ReplicatedStorage:WaitForChild("ShelfAssigned")
+
+-- Variable to store the last assigned shelf (set by the event listener)
+local assignedShelf = nil
+
+-- Connect to the remote event ONCE outside the loop
+ShelfAssignedEvent.OnClientEvent:Connect(function(shelf)
+    -- Only accept if it's one of the expected shelves (safety check)
+    if shelf and shelf:IsDescendantOf(Workspace) then
+        assignedShelf = shelf
+        print("[ShelfBot] ShelfAssigned received: " .. shelf:GetFullName())
+    end
+end)
 
 local function Log(msg)
     print("[ShelfBot]", msg)
@@ -142,7 +158,7 @@ local function MoveToPart(part)
     return MoveToPosition(part.Position)
 end
 
--- Spam the E key to trigger ProximityPrompt even if obstructed
+-- Spam the E key to trigger ProximityPrompt
 local function SpamProximityPrompt()
     Log("Spamming proximity prompt (" .. PROMPT_SPAM_ATTEMPTS .. " pulses)")
     for i = 1, PROMPT_SPAM_ATTEMPTS do
@@ -178,53 +194,10 @@ local function GetClosestPromptPart()
     return prompts[1].part
 end
 
--- Check the 4 specific shelf pads and return the first visible Hitbox
-local function GetFirstVisibleShelfHitbox()
-    local shelfFolder = Workspace:FindFirstChild("StockShelves")
-    if not shelfFolder then
-        Log("StockShelves not found")
-        return nil
-    end
-
-    local padPaths = {
-        {"GetChildren", 3},   -- GetChildren()[3]
-        {"GetChildren", 2},   -- GetChildren()[2]
-        {"ShelfStock"},       -- ShelfStock
-        {"GetChildren", 4},   -- GetChildren()[4]
-    }
-
-    for _, pathData in ipairs(padPaths) do
-        local parentFolder
-        if type(pathData[1]) == "string" then
-            parentFolder = shelfFolder:FindFirstChild(pathData[1])
-        else
-            local children = shelfFolder:GetChildren()
-            local idx = pathData[2]
-            if idx and #children >= idx then
-                parentFolder = children[idx]
-            end
-        end
-
-        if parentFolder then
-            local pad = parentFolder:FindFirstChild("Pad")
-            if pad and pad:IsA("BasePart") and pad.Transparency < 0.99 then
-                local hitbox = parentFolder:FindFirstChild("Hitbox")
-                if hitbox and hitbox:IsA("BasePart") then
-                    Log("Visible pad found in: " .. parentFolder.Name)
-                    return hitbox
-                end
-            end
-        end
-    end
-
-    Log("No visible pads with Hitbox found")
-    return nil
-end
-
--- Main loop (revised order)
+-- Main loop
 local function MainLoop()
     while true do
-        -- Ensure character is alive and loaded
+        -- Ensure character is alive
         repeat
             Character = LocalPlayer.Character
             if Character then
@@ -236,10 +209,9 @@ local function MainLoop()
 
         Log("=== New cycle ===")
 
-        -- Step 1: Move to fixed coordinates
+        -- Step 1: Move to fixed position
         Log("Moving to fixed position: " .. tostring(FIXED_POSITION))
-        local success = MoveToPosition(FIXED_POSITION)
-        if not success then
+        if not MoveToPosition(FIXED_POSITION) then
             Log("Failed to reach fixed position, retrying in 3s")
             task.wait(3)
             continue
@@ -250,37 +222,44 @@ local function MainLoop()
         local promptPart = GetClosestPromptPart()
         if promptPart then
             Log("Closest prompt found at: " .. promptPart:GetFullName())
-            MoveToPart(promptPart)   -- Move right onto it
-            task.wait(0.5)           -- settle
+            MoveToPart(promptPart)
+            task.wait(0.5)
             SpamProximityPrompt()
         else
             Log("No enabled ProximityPrompt available")
         end
 
-        -- Step 3: Check shelves for a visible pad
-        local hitbox = GetFirstVisibleShelfHitbox()
-        if not hitbox then
-            Log("No visible shelf pad, waiting 3s before restarting cycle")
-            task.wait(3)
+        -- Step 3: Wait for the ShelfAssigned remote to fire
+        assignedShelf = nil  -- Reset from previous cycle
+        Log("Waiting for ShelfAssigned remote...")
+        repeat
+            task.wait(0.1)   -- Check frequently but not too often
+        until assignedShelf ~= nil
+
+        -- Verify the shelf is valid (it should be one of the four expected shelves)
+        local shelf = assignedShelf
+        local hitbox = shelf and shelf:FindFirstChild("Hitbox")
+        if not hitbox or not hitbox:IsA("BasePart") then
+            Log("Assigned shelf does not have a valid Hitbox, skipping cycle")
+            task.wait(2)
             continue
         end
 
-        -- Step 4: Move to the Hitbox
-        Log("Moving to hitbox: " .. hitbox:GetFullName())
-        success = MoveToPart(hitbox)
-        if not success then
-            Log("Failed to reach hitbox, retrying cycle")
+        -- Step 4: Move to the assigned shelf's Hitbox
+        Log("Moving to assigned shelf's Hitbox: " .. hitbox:GetFullName())
+        if not MoveToPart(hitbox) then
+            Log("Failed to reach Hitbox, retrying cycle")
             task.wait(2)
             continue
         end
 
         -- Step 5: Wait 4 seconds at the Hitbox
-        Log("Reached hitbox, waiting 4 seconds...")
+        Log("Reached Hitbox, waiting 4 seconds...")
         task.wait(4)
 
         Log("Cycle complete, restarting")
     end
 end
 
-Log("Shelf Bot started (revised order)")
+Log("Shelf Bot started (remote-driven)")
 MainLoop()
