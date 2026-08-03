@@ -1,0 +1,256 @@
+--[[
+    Auto Shelf Pad + Proximity Prompt Loop
+    Uses pathfinding movement, now targets the nearest ProximityPrompt
+--]]
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local PathfindingService = game:GetService("PathfindingService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local HRP = Character:WaitForChild("HumanoidRootPart")
+
+-- Movement settings
+local MOVE_SPEED = 22
+local WAYPOINT_SPACING = 3
+local TWEEN_TIMEOUT = 30
+
+local function Log(msg)
+    print("[ShelfBot]", msg)
+end
+
+local function GetFootPosition()
+    return HRP.Position - Vector3.new(0, 2.5, 0)
+end
+
+local function ComputePath(startPos, endPos)
+    local paramSets = {
+        {Radius = 1,   Height = 4,   Spacing = 2},
+        {Radius = 1.2, Height = 4.5, Spacing = 2.5},
+        {Radius = 1.5, Height = 5,   Spacing = 3},
+        {Radius = 2,   Height = 5.5, Spacing = 4},
+        {Radius = 2.5, Height = 6,   Spacing = 5},
+        {Radius = 3,   Height = 6.5, Spacing = 5},
+        {Radius = 3.5, Height = 7,   Spacing = 6},
+        {Radius = 4,   Height = 7.5, Spacing = 6},
+        {Radius = 1,   Height = 8,   Spacing = 3},
+        {Radius = 5,   Height = 5,   Spacing = 5},
+        {Radius = 1.8, Height = 4.2, Spacing = 2.2},
+        {Radius = 2.2, Height = 5.8, Spacing = 4.5},
+        {Radius = 2.8, Height = 6.2, Spacing = 5.5},
+        {Radius = 3.2, Height = 6.8, Spacing = 5.8},
+        {Radius = 3.8, Height = 7.2, Spacing = 6.2},
+    }
+
+    for _, params in ipairs(paramSets) do
+        local pathParams = {
+            AgentRadius = params.Radius,
+            AgentHeight = params.Height,
+            AgentCanJump = true,
+            AgentCanClimb = true,
+            WaypointSpacing = params.Spacing,
+            CostCalibration = true,
+        }
+        local path = PathfindingService:CreatePath(pathParams)
+        local success = pcall(function() path:ComputeAsync(startPos, endPos) end)
+        if success and path.Status == Enum.PathStatus.Success then
+            local raw = path:GetWaypoints()
+            if not raw or #raw < 2 then return raw end
+            local refined = {}
+            table.insert(refined, raw[1])
+            for i = 2, #raw do
+                local prev = raw[i-1].Position
+                local curr = raw[i].Position
+                local dist = (curr - prev).Magnitude
+                if dist <= WAYPOINT_SPACING then
+                    table.insert(refined, raw[i])
+                else
+                    local steps = math.ceil(dist / WAYPOINT_SPACING)
+                    for j = 1, steps do
+                        local alpha = j / steps
+                        local pos = prev:Lerp(curr, alpha)
+                        local action = (j == steps and raw[i].Action) or Enum.PathWaypointAction.Walk
+                        table.insert(refined, {Position = pos, Action = action})
+                    end
+                end
+            end
+            return refined
+        end
+        task.wait(0.05)
+    end
+    return nil
+end
+
+local function MoveToPosition(targetPos)
+    local footPos = GetFootPosition()
+    if (targetPos - footPos).Magnitude < 0.5 then return true end
+    Log("Computing path to " .. tostring(targetPos))
+    local path = ComputePath(footPos, targetPos)
+    if not path then
+        Log("Path not found")
+        return false
+    end
+    local startTime = tick()
+    for _, waypoint in ipairs(path) do
+        if not HRP or not HRP.Parent or Humanoid.Health <= 0 then return false end
+        if tick() - startTime > TWEEN_TIMEOUT then return false end
+        local wpPos = waypoint.Position
+        local targetHRP = wpPos + Vector3.new(0, 2.5, 0)
+        local dist = (targetHRP - HRP.Position).Magnitude
+        if dist > 0.2 then
+            local tweenInfo = TweenInfo.new(dist / MOVE_SPEED, Enum.EasingStyle.Linear)
+            local goal = {CFrame = CFrame.new(targetHRP) * (HRP.CFrame - HRP.Position)}
+            local tween = TweenService:Create(HRP, tweenInfo, goal)
+            tween:Play()
+            tween.Completed:Wait()
+        end
+        if waypoint.Action == Enum.PathWaypointAction.Jump then
+            Humanoid.Jump = true
+            task.wait(0.1)
+        end
+    end
+    HRP.CFrame = CFrame.new(targetPos + Vector3.new(0, 2.5, 0))
+    HRP.AssemblyLinearVelocity = Vector3.zero
+    HRP.AssemblyAngularVelocity = Vector3.zero
+    return true
+end
+
+local function MoveToPart(part)
+    return MoveToPosition(part.Position)
+end
+
+local function HoldE(duration)
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, nil)
+    task.wait(duration)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
+end
+
+-- Find the closest enabled ProximityPrompt and return its parent part
+local function GetClosestPromptPart()
+    local prompts = {}
+    for _, prompt in ipairs(Workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
+            local parent = prompt.Parent
+            if parent then
+                -- Get a BasePart to move to (the prompt's parent itself if it's a part, or the first child part)
+                local part = parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart")
+                if part then
+                    table.insert(prompts, {prompt = prompt, part = part, distance = (HRP.Position - part.Position).Magnitude})
+                end
+            end
+        end
+    end
+    if #prompts == 0 then return nil end
+    table.sort(prompts, function(a, b) return a.distance < b.distance end)
+    return prompts[1].part
+end
+
+local function MainLoop()
+    while true do
+        repeat
+            Character = LocalPlayer.Character
+            if Character then
+                Humanoid = Character:FindFirstChildOfClass("Humanoid")
+                HRP = Character:FindFirstChild("HumanoidRootPart")
+            end
+            task.wait(0.5)
+        until Character and Humanoid and HRP and Humanoid.Health > 0
+
+        Log("Starting new cycle")
+
+        local shelfFolder = Workspace:FindFirstChild("StockShelves")
+        if not shelfFolder then
+            Log("StockShelves not found, retrying in 5s")
+            task.wait(5)
+            continue
+        end
+
+        -- Pad checking (same as before)
+        local padPaths = {
+            {"GetChildren", 3},
+            {"GetChildren", 2},
+            {"ShelfStock"},
+            {"GetChildren", 4},
+        }
+        local targetHitbox = nil
+
+        for _, pathData in ipairs(padPaths) do
+            local parentFolder
+            if type(pathData[1]) == "string" then
+                parentFolder = shelfFolder:FindFirstChild(pathData[1])
+            else
+                local children = shelfFolder:GetChildren()
+                local idx = pathData[2]
+                if idx and #children >= idx then
+                    parentFolder = children[idx]
+                end
+            end
+
+            if parentFolder then
+                local pad = parentFolder:FindFirstChild("Pad")
+                if pad and pad:IsA("BasePart") then
+                    if pad.Transparency < 0.99 then
+                        local hitbox = parentFolder:FindFirstChild("Hitbox")
+                        if hitbox and hitbox:IsA("BasePart") then
+                            targetHitbox = hitbox
+                            Log("Visible pad found in: " .. parentFolder.Name)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        if not targetHitbox then
+            Log("No visible pad, retrying in 5s")
+            task.wait(5)
+            continue
+        end
+
+        -- Move to hitbox
+        if not MoveToPart(targetHitbox) then
+            Log("Failed to reach hitbox, retrying")
+            task.wait(2)
+            continue
+        end
+
+        Log("Reached hitbox, waiting 6 seconds...")
+        task.wait(6)
+
+        -- Move to fixed coordinates
+        local fixedPos = Vector3.new(-514, 199, 140)
+        Log("Moving to fixed coordinates")
+        if not MoveToPosition(fixedPos) then
+            Log("Failed to reach fixed pos, retrying")
+            task.wait(2)
+            continue
+        end
+
+        Log("Reached fixed position, waiting 1 second...")
+        task.wait(1)
+
+        -- Interact with the CLOSEST ProximityPrompt
+        local promptPart = GetClosestPromptPart()
+        if promptPart then
+            Log("Closest prompt part: " .. promptPart:GetFullName())
+            MoveToPart(promptPart)
+            task.wait(0.5)
+            Log("Holding E to trigger prompt for 2 seconds")
+            HoldE(2)
+        else
+            Log("No enabled ProximityPrompt found")
+        end
+
+        Log("Cycle complete, restarting in 2s")
+        task.wait(2)
+    end
+end
+
+Log("Shelf Bot started")
+MainLoop()
