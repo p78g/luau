@@ -1,200 +1,25 @@
---[[
-    Auto Shelf + Prompt Loop (Remote-Driven)
-    1. Move to fixed position (-514,199,140)
-    2. Spam nearest ProximityPrompt
-    3. Wait for "ShelfAssigned" remote to fire
-    4. Move to the assigned shelf's Hitbox
-    5. Wait 4 seconds
-    6. Repeat
---]]
-
--- Services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local PathfindingService = game:GetService("PathfindingService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
-local LocalPlayer = Players.LocalPlayer
-local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local Humanoid = Character:WaitForChild("Humanoid")
-local HRP = Character:WaitForChild("HumanoidRootPart")
-
--- Movement settings
-local MOVE_SPEED = 22
-local WAYPOINT_SPACING = 3
-local TWEEN_TIMEOUT = 30
-
--- Prompt spam settings
-local PROMPT_SPAM_ATTEMPTS = 10
-local PROMPT_HOLD_TIME = 0.3
-local PROMPT_GAP = 0.2
-
--- Fixed coordinates
-local FIXED_POSITION = Vector3.new(-514, 199, 140)
-
--- Remote event to listen for shelf assignments
-local ShelfAssignedEvent = ReplicatedStorage:WaitForChild("ShelfAssigned")
-
--- Variable to store the last assigned shelf (set by the event listener)
-local assignedShelf = nil
-
--- Connect to the remote event ONCE outside the loop
-ShelfAssignedEvent.OnClientEvent:Connect(function(shelf)
-    -- Only accept if it's one of the expected shelves (safety check)
-    if shelf and shelf:IsDescendantOf(Workspace) then
-        assignedShelf = shelf
-        print("[ShelfBot] ShelfAssigned received: " .. shelf:GetFullName())
-    end
-end)
-
-local function Log(msg)
-    print("[ShelfBot]", msg)
-end
-
-local function GetFootPosition()
-    return HRP.Position - Vector3.new(0, 2.5, 0)
-end
-
--- Pathfinding (tries multiple agent sizes)
-local function ComputePath(startPos, endPos)
-    local paramSets = {
-        {Radius = 1,   Height = 4,   Spacing = 2},
-        {Radius = 1.2, Height = 4.5, Spacing = 2.5},
-        {Radius = 1.5, Height = 5,   Spacing = 3},
-        {Radius = 2,   Height = 5.5, Spacing = 4},
-        {Radius = 2.5, Height = 6,   Spacing = 5},
-        {Radius = 3,   Height = 6.5, Spacing = 5},
-        {Radius = 3.5, Height = 7,   Spacing = 6},
-        {Radius = 4,   Height = 7.5, Spacing = 6},
-        {Radius = 1,   Height = 8,   Spacing = 3},
-        {Radius = 5,   Height = 5,   Spacing = 5},
-        {Radius = 1.8, Height = 4.2, Spacing = 2.2},
-        {Radius = 2.2, Height = 5.8, Spacing = 4.5},
-        {Radius = 2.8, Height = 6.2, Spacing = 5.5},
-        {Radius = 3.2, Height = 6.8, Spacing = 5.8},
-        {Radius = 3.8, Height = 7.2, Spacing = 6.2},
-    }
-    for _, params in ipairs(paramSets) do
-        local pathParams = {
-            AgentRadius = params.Radius,
-            AgentHeight = params.Height,
-            AgentCanJump = true,
-            AgentCanClimb = true,
-            WaypointSpacing = params.Spacing,
-            CostCalibration = true,
-        }
-        local path = PathfindingService:CreatePath(pathParams)
-        local success = pcall(function() path:ComputeAsync(startPos, endPos) end)
-        if success and path.Status == Enum.PathStatus.Success then
-            local raw = path:GetWaypoints()
-            if not raw or #raw < 2 then return raw end
-            local refined = {}
-            table.insert(refined, raw[1])
-            for i = 2, #raw do
-                local prev = raw[i-1].Position
-                local curr = raw[i].Position
-                local dist = (curr - prev).Magnitude
-                if dist <= WAYPOINT_SPACING then
-                    table.insert(refined, raw[i])
-                else
-                    local steps = math.ceil(dist / WAYPOINT_SPACING)
-                    for j = 1, steps do
-                        local alpha = j / steps
-                        local pos = prev:Lerp(curr, alpha)
-                        local action = (j == steps and raw[i].Action) or Enum.PathWaypointAction.Walk
-                        table.insert(refined, {Position = pos, Action = action})
-                    end
-                end
-            end
-            return refined
-        end
-        task.wait(0.05)
-    end
-    return nil
-end
-
-local function MoveToPosition(targetPos)
-    local footPos = GetFootPosition()
-    if (targetPos - footPos).Magnitude < 0.5 then
-        Log("Already at target")
-        return true
-    end
-    Log("Computing path to " .. tostring(targetPos))
-    local path = ComputePath(footPos, targetPos)
-    if not path then
-        Log("Path not found")
-        return false
-    end
-    Log("Moving along " .. #path .. " waypoints")
-    local startTime = tick()
-    for _, waypoint in ipairs(path) do
-        if not HRP or not HRP.Parent or Humanoid.Health <= 0 then return false end
-        if tick() - startTime > TWEEN_TIMEOUT then return false end
-        local wpPos = waypoint.Position
-        local targetHRP = wpPos + Vector3.new(0, 2.5, 0)
-        local dist = (targetHRP - HRP.Position).Magnitude
-        if dist > 0.2 then
-            local tweenInfo = TweenInfo.new(dist / MOVE_SPEED, Enum.EasingStyle.Linear)
-            local goal = {CFrame = CFrame.new(targetHRP) * (HRP.CFrame - HRP.Position)}
-            local tween = TweenService:Create(HRP, tweenInfo, goal)
-            tween:Play()
-            tween.Completed:Wait()
-        end
-        if waypoint.Action == Enum.PathWaypointAction.Jump then
-            Humanoid.Jump = true
-            task.wait(0.1)
-        end
-    end
-    HRP.CFrame = CFrame.new(targetPos + Vector3.new(0, 2.5, 0))
-    HRP.AssemblyLinearVelocity = Vector3.zero
-    HRP.AssemblyAngularVelocity = Vector3.zero
-    return true
-end
-
-local function MoveToPart(part)
-    return MoveToPosition(part.Position)
-end
-
--- Spam the E key to trigger ProximityPrompt
-local function SpamProximityPrompt()
-    Log("Spamming proximity prompt (" .. PROMPT_SPAM_ATTEMPTS .. " pulses)")
-    for i = 1, PROMPT_SPAM_ATTEMPTS do
+-- Spam the E key but stop early if the ShelfAssigned remote fires
+local function SpamProximityPromptUntilAssigned()
+    Log("Spamming proximity prompt until ShelfAssigned fires...")
+    local attempts = 0
+    local maxAttempts = 100       -- safety timeout (100 pulses ~ 50 seconds)
+    while assignedShelf == nil and attempts < maxAttempts do
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, nil)
         task.wait(PROMPT_HOLD_TIME)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
-        if i < PROMPT_SPAM_ATTEMPTS then
-            task.wait(PROMPT_GAP)
+        task.wait(PROMPT_GAP)
+        attempts = attempts + 1
+        if assignedShelf ~= nil then
+            Log("ShelfAssigned received, stopping spam")
+            break
         end
     end
-    Log("Prompt spam finished")
-end
-
--- Find the closest enabled ProximityPrompt and return its parent part
-local function GetClosestPromptPart()
-    local prompts = {}
-    for _, prompt in ipairs(Workspace:GetDescendants()) do
-        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
-            local parent = prompt.Parent
-            if parent then
-                local part = parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart")
-                if part then
-                    table.insert(prompts, {
-                        part = part,
-                        distance = (HRP.Position - part.Position).Magnitude
-                    })
-                end
-            end
-        end
+    if assignedShelf == nil then
+        Log("Warning: ShelfAssigned never fired after " .. maxAttempts .. " attempts")
     end
-    if #prompts == 0 then return nil end
-    table.sort(prompts, function(a, b) return a.distance < b.distance end)
-    return prompts[1].part
 end
 
--- Main loop
+-- Main loop (revised step 2 and 3)
 local function MainLoop()
     while true do
         -- Ensure character is alive
@@ -218,25 +43,30 @@ local function MainLoop()
         end
         Log("Arrived at fixed position")
 
-        -- Step 2: Spam the nearest ProximityPrompt
+        -- Step 2: Move to the nearest ProximityPrompt's part
         local promptPart = GetClosestPromptPart()
         if promptPart then
             Log("Closest prompt found at: " .. promptPart:GetFullName())
             MoveToPart(promptPart)
             task.wait(0.5)
-            SpamProximityPrompt()
         else
-            Log("No enabled ProximityPrompt available")
+            Log("No enabled ProximityPrompt available, retrying cycle")
+            task.wait(2)
+            continue
         end
 
-        -- Step 3: Wait for the ShelfAssigned remote to fire
-        assignedShelf = nil  -- Reset from previous cycle
-        Log("Waiting for ShelfAssigned remote...")
-        repeat
-            task.wait(0.1)   -- Check frequently but not too often
-        until assignedShelf ~= nil
+        -- Step 3: Spam the prompt and listen for the remote at the same time
+        assignedShelf = nil  -- Reset
+        SpamProximityPromptUntilAssigned()
 
-        -- Verify the shelf is valid (it should be one of the four expected shelves)
+        -- After spamming, if still no shelf assigned, retry the whole cycle
+        if assignedShelf == nil then
+            Log("No shelf assigned, retrying cycle in 3 seconds")
+            task.wait(3)
+            continue
+        end
+
+        -- Step 4: Move to the assigned shelf's Hitbox
         local shelf = assignedShelf
         local hitbox = shelf and shelf:FindFirstChild("Hitbox")
         if not hitbox or not hitbox:IsA("BasePart") then
@@ -245,7 +75,6 @@ local function MainLoop()
             continue
         end
 
-        -- Step 4: Move to the assigned shelf's Hitbox
         Log("Moving to assigned shelf's Hitbox: " .. hitbox:GetFullName())
         if not MoveToPart(hitbox) then
             Log("Failed to reach Hitbox, retrying cycle")
@@ -260,6 +89,3 @@ local function MainLoop()
         Log("Cycle complete, restarting")
     end
 end
-
-Log("Shelf Bot started (remote-driven)")
-MainLoop()
