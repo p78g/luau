@@ -16,7 +16,7 @@ local Character, Humanoid, HRP
 local FIXED_POSITION  = Vector3.new(-515, 199, 141)
 local PROMPT_HOLD_TIME = 0.3
 local PROMPT_GAP       = 0.2
-local MOVE_SPEED       = 40
+local MOVE_SPEED       = 70
 local WAYPOINT_SPACING = 3
 local MAX_PROMPT_ATTEMPTS = 100
 local DEBUG = true
