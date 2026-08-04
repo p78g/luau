@@ -1,0 +1,239 @@
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Players            = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local TweenService       = game:GetService("TweenService")
+local LocalPlayer        = Players.LocalPlayer
+
+local remote = ReplicatedStorage.WeaponsSystem.Network.WeaponHit
+
+local char = LocalPlayer.Character
+local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+local hum  = char and char:FindFirstChildOfClass("Humanoid")
+
+local tool = LocalPlayer.Backpack:FindFirstChild("Sniper")
+    or char:FindFirstChild("Sniper")
+    or char:FindFirstChildOfClass("Tool")
+    or LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
+
+if not tool then print("[Kill] No tool") return end
+if not hrp  then print("[Kill] No HRP")  return end
+
+LocalPlayer:SetAttribute("IsAiming", true)
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.1)
+    LocalPlayer:SetAttribute("IsAiming", true)
+    char = LocalPlayer.Character
+    hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    hum  = char and char:FindFirstChildOfClass("Humanoid")
+end)
+
+local targetPlayer = Players:FindFirstChild("emPyF8WTZvJdgK5Vq36W")
+if not targetPlayer then
+    print("[Kill] Target not in server")
+    return
+end
+
+print("[Kill] Target locked:", targetPlayer.Name)
+
+local SKY_OFFSET    = 100   -- studs above target
+local MOVE_SPEED    = 40
+local FIRE_RATE     = 0.1
+local HOVER_RADIUS  = 3     -- how close above target before we consider "arrived"
+
+-- ── Phase 1: launch LocalPlayer to SKY_OFFSET above their current position ──
+local function LaunchToSky(targetHRP)
+    local skyPos = Vector3.new(
+        targetHRP.Position.X,
+        targetHRP.Position.Y + SKY_OFFSET,
+        targetHRP.Position.Z
+    )
+    print("[Kill] Launching to sky:", tostring(skyPos))
+
+    -- Kill all momentum first
+    hrp.AssemblyLinearVelocity  = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+
+    local tween = TweenService:Create(
+        hrp,
+        TweenInfo.new(
+            (skyPos - hrp.Position).Magnitude / MOVE_SPEED,
+            Enum.EasingStyle.Quad,
+            Enum.EasingDirection.Out
+        ),
+        { CFrame = CFrame.new(skyPos) * CFrame.Angles(math.rad(90), 0, 0) }
+    )
+    tween:Play()
+    tween.Completed:Wait()
+
+    -- Kill momentum again after tween — no drift, no fall
+    hrp.AssemblyLinearVelocity  = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+
+    print("[Kill] Sky position reached")
+end
+
+-- ── Phase 2: pathfind above target, staying SKY_OFFSET studs up ──
+local PATH_PARAMS = {
+    { Radius = 1,   Height = 4,   Spacing = 2 },
+    { Radius = 1.5, Height = 5,   Spacing = 3 },
+    { Radius = 2,   Height = 5.5, Spacing = 4 },
+    { Radius = 3,   Height = 6.5, Spacing = 5 },
+    { Radius = 4,   Height = 7.5, Spacing = 6 },
+    { Radius = 5,   Height = 5,   Spacing = 5 },
+}
+
+local function ComputePath(startPos, endPos)
+    for _, p in ipairs(PATH_PARAMS) do
+        local path = PathfindingService:CreatePath({
+            AgentRadius     = p.Radius,
+            AgentHeight     = p.Height,
+            AgentCanJump    = true,
+            AgentCanClimb   = true,
+            WaypointSpacing = p.Spacing,
+        })
+        local ok = pcall(function() path:ComputeAsync(startPos, endPos) end)
+        if ok and path.Status == Enum.PathStatus.Success then
+            return path:GetWaypoints()
+        end
+        task.wait(0.05)
+    end
+    return nil
+end
+
+local function PathfindAboveTarget(targetHRP)
+    local skyTarget = Vector3.new(
+        targetHRP.Position.X,
+        targetHRP.Position.Y + SKY_OFFSET,
+        targetHRP.Position.Z
+    )
+
+    local dist = (hrp.Position - skyTarget).Magnitude
+    if dist < HOVER_RADIUS then return true end  -- already above them
+
+    print("[Kill] Pathfinding to sky above target...")
+    local waypoints = ComputePath(hrp.Position, skyTarget)
+
+    if not waypoints then
+        -- Pathfinding failed at altitude — tween direct
+        print("[Kill] Path failed, tweening direct")
+        local tween = TweenService:Create(
+            hrp,
+            TweenInfo.new(dist / MOVE_SPEED, Enum.EasingStyle.Linear),
+            { CFrame = CFrame.new(skyTarget) * CFrame.Angles(math.rad(90), 0, 0) }
+        )
+        tween:Play()
+        tween.Completed:Wait()
+        hrp.AssemblyLinearVelocity  = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        return true
+    end
+
+    for _, wp in ipairs(waypoints) do
+        local targetHRP_pos = wp.Position + Vector3.new(0, 2.5, 0)
+        local wdist         = (targetHRP_pos - hrp.Position).Magnitude
+        if wdist > 0.2 then
+            -- Face downward while moving
+            local downCF = CFrame.new(targetHRP_pos) * CFrame.Angles(math.rad(90), 0, 0)
+            local tween  = TweenService:Create(
+                hrp,
+                TweenInfo.new(wdist / MOVE_SPEED, Enum.EasingStyle.Linear),
+                { CFrame = downCF }
+            )
+            tween:Play()
+            tween.Completed:Wait()
+        end
+        if wp.Action == Enum.PathWaypointAction.Jump and hum then
+            hum.Jump = true
+            task.wait(0.1)
+        end
+    end
+
+    hrp.AssemblyLinearVelocity  = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    print("[Kill] Hovering above target")
+    return true
+end
+
+-- ── Phase 3: hover + fire loop ──────────────────────────────────────────────
+local function FireLoop()
+    while true do
+        LocalPlayer:SetAttribute("IsAiming", true)
+
+        local tchar = targetPlayer.Character
+        local thrp  = tchar and tchar:FindFirstChild("HumanoidRootPart")
+        local thead = tchar and tchar:FindFirstChild("Head")
+        local thum  = tchar and tchar:FindFirstChildOfClass("Humanoid")
+
+        if not thrp or not thum or not thead or thum.Health <= 0 then
+            print("[Kill] Waiting for respawn...")
+            task.wait(3)
+            -- Re-launch on respawn
+            local newTChar = targetPlayer.Character
+            local newTHRP  = newTChar and newTChar:FindFirstChild("HumanoidRootPart")
+            if newTHRP then
+                LaunchToSky(newTHRP)
+            end
+            continue
+        end
+
+        -- Track target horizontally, stay at SKY_OFFSET above them
+        local skyPos = Vector3.new(
+            thrp.Position.X,
+            thrp.Position.Y + SKY_OFFSET,
+            thrp.Position.Z
+        )
+
+        -- If we've drifted more than HOVER_RADIUS, re-path
+        if (hrp.Position - skyPos).Magnitude > HOVER_RADIUS then
+            PathfindAboveTarget(thrp)
+        end
+
+        -- Always face straight down toward target
+        hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(
+            thrp.Position.X,
+            hrp.Position.Y,   -- keep our Y, look toward their XZ then tilt down
+            thrp.Position.Z
+        )) * CFrame.Angles(math.rad(90), 0, 0)
+
+        -- Kill any downward momentum every cycle
+        local vel = hrp.AssemblyLinearVelocity
+        if vel.Y < 0 then
+            hrp.AssemblyLinearVelocity = Vector3.new(vel.X, 0, vel.Z)
+        end
+
+        local hitNormal = (hrp.Position - thead.Position).Unit
+        local hitDist   = (hrp.Position - thead.Position).Magnitude
+
+        pcall(function()
+            remote:FireServer(tool, {
+                p       = thead.Position,
+                pid     = 1,
+                part    = thead,
+                d       = hitDist,
+                maxDist = 999,
+                h       = thum,
+                m       = Enum.Material.Plastic,
+                n       = hitNormal,
+                t       = tick(),
+                sid     = math.random(1, 999999)
+            })
+        end)
+
+        print("[Kill] Hit — health:", thum.Health)
+        task.wait(FIRE_RATE)
+    end
+end
+
+-- ── Boot sequence ────────────────────────────────────────────────────────────
+local initChar = targetPlayer.Character
+local initHRP  = initChar and initChar:FindFirstChild("HumanoidRootPart")
+
+if not initHRP then
+    print("[Kill] Waiting for target character...")
+    repeat task.wait(0.5) until targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    initHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+end
+
+LaunchToSky(initHRP)
+PathfindAboveTarget(initHRP)
+FireLoop()
