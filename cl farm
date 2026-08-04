@@ -1,6 +1,6 @@
 -- ==========================================
 -- SHELF BOT — full build
--- move speed 40, fast prompt spam, player exile
+-- move speed 40, single prompt fire with retry, continuous player exile, dwell 5s
 -- ==========================================
 
 local RunService          = game:GetService("RunService")
@@ -14,14 +14,16 @@ local LocalPlayer = Players.LocalPlayer
 local Character, Humanoid, HRP
 
 -- ── Config ────────────────────────────────
-local FIXED_POSITION       = Vector3.new(-515, 199, 141)
-local PROMPT_HOLD_TIME     = 0.05
-local PROMPT_GAP           = 0.05
-local MOVE_SPEED           = 40
-local WAYPOINT_SPACING     = 3
-local MAX_PROMPT_ATTEMPTS  = 200
-local HITBOX_DWELL         = 1
-local DEBUG                = true
+local FIXED_POSITION        = Vector3.new(-515, 199, 141)
+local PROMPT_HOLD_TIME      = 0.05
+local PROMPT_WAIT_TIMEOUT   = 1.5    -- seconds to wait for remote after each fire
+local MAX_PROMPT_ATTEMPTS   = 50     -- max individual fires before giving up
+local MOVE_SPEED            = 40
+local WAYPOINT_SPACING      = 3
+local HITBOX_DWELL          = 5
+local EXILE_CF              = CFrame.new(0, 0, 0)
+local EXILE_DRIFT_THRESHOLD = 10
+local DEBUG                 = true
 
 -- ── State ─────────────────────────────────
 local assignedShelf = nil
@@ -29,9 +31,7 @@ local shelfSignal   = Instance.new("BindableEvent")
 
 -- ── Logging ───────────────────────────────
 local function Log(msg)
-    if DEBUG then
-        print("[ShelfBot]", msg)
-    end
+    if DEBUG then print("[ShelfBot]", msg) end
 end
 
 -- ── Remote wiring ─────────────────────────
@@ -43,16 +43,12 @@ ShelfAssignedEvent.OnClientEvent:Connect(function(shelf)
 end)
 
 -- ── Player exile ──────────────────────────
-local EXILE_CF = CFrame.new(0, 0, 0)
-
 local function ExilePlayer(player)
     if player == LocalPlayer then return end
     local char = player.Character
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
-    if hrp then
-        hrp.CFrame = EXILE_CF
-    end
+    if hrp then hrp.CFrame = EXILE_CF end
 end
 
 local function ExileAllPlayers()
@@ -80,10 +76,22 @@ for _, player in ipairs(Players:GetPlayers()) do
     end
 end
 
+RunService.Heartbeat:Connect(function()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        local char = player.Character
+        if not char then continue end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp and hrp.Position.Magnitude > EXILE_DRIFT_THRESHOLD then
+            hrp.CFrame = EXILE_CF
+        end
+    end
+end)
+
 -- ── Path visuals ──────────────────────────
-local PathVisualsFolder      = Instance.new("Folder")
-PathVisualsFolder.Name       = "ShelfBotPathVisuals"
-PathVisualsFolder.Parent     = workspace
+local PathVisualsFolder  = Instance.new("Folder")
+PathVisualsFolder.Name   = "ShelfBotPathVisuals"
+PathVisualsFolder.Parent = workspace
 
 local function ClearPathVisuals()
     for _, c in ipairs(PathVisualsFolder:GetChildren()) do
@@ -96,27 +104,27 @@ local function VisualizePath(waypoints, startPos)
     if not waypoints or #waypoints == 0 then return end
     local prevPos = startPos
     for i, wp in ipairs(waypoints) do
-        local part          = Instance.new("Part")
-        part.Size           = Vector3.new(0.6, 0.6, 0.6)
-        part.Position       = wp.Position
-        part.Anchored       = true
-        part.CanCollide     = false
-        part.Material       = Enum.Material.Neon
-        part.Color          = Color3.fromHSV(i / #waypoints, 1, 1)
-        part.Transparency   = 0.3
-        part.Parent         = PathVisualsFolder
+        local part        = Instance.new("Part")
+        part.Size         = Vector3.new(0.6, 0.6, 0.6)
+        part.Position     = wp.Position
+        part.Anchored     = true
+        part.CanCollide   = false
+        part.Material     = Enum.Material.Neon
+        part.Color        = Color3.fromHSV(i / #waypoints, 1, 1)
+        part.Transparency = 0.3
+        part.Parent       = PathVisualsFolder
 
         local dist = (wp.Position - prevPos).Magnitude
         if dist > 0.5 then
-            local line          = Instance.new("Part")
-            line.Anchored       = true
-            line.CanCollide     = false
-            line.Material       = Enum.Material.Neon
-            line.Color          = Color3.new(0, 1, 0)
-            line.Transparency   = 0.5
-            line.Size           = Vector3.new(0.3, 0.3, dist)
-            line.CFrame         = CFrame.lookAt(prevPos + (wp.Position - prevPos) / 2, wp.Position)
-            line.Parent         = PathVisualsFolder
+            local line        = Instance.new("Part")
+            line.Anchored     = true
+            line.CanCollide   = false
+            line.Material     = Enum.Material.Neon
+            line.Color        = Color3.new(0, 1, 0)
+            line.Transparency = 0.5
+            line.Size         = Vector3.new(0.3, 0.3, dist)
+            line.CFrame       = CFrame.lookAt(prevPos + (wp.Position - prevPos) / 2, wp.Position)
+            line.Parent       = PathVisualsFolder
         end
         prevPos = wp.Position
     end
@@ -233,54 +241,54 @@ local function MoveToPart(part)
     return MoveToPosition(cf.Position + look.Unit * 4)
 end
 
--- ── Proximity prompt ──────────────────────
-local function GetClosestPromptPart()
-    if not HRP then return nil end
-    local best, bestDist = nil, math.huge
-    for _, desc in ipairs(workspace:GetDescendants()) do
-        if desc:IsA("ProximityPrompt") and desc.Enabled then
-            local parent = desc.Parent
-            if parent and parent:IsA("BasePart") then
-                local d = (parent.Position - HRP.Position).Magnitude
-                if d < bestDist then
-                    bestDist = d
-                    best     = parent
-                end
-            end
-        end
-    end
-    return best
+-- ── Proximity prompt — fire once, wait, retry on miss ────
+local function FirePromptOnce()
+    VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.E, false, nil)
+    task.wait(PROMPT_HOLD_TIME)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
 end
 
-local function SpamProximityPromptUntilAssigned()
-    Log("Spamming E until ShelfAssigned fires...")
-    local resolved   = false
-    local connection
-    connection = shelfSignal.Event:Connect(function()
-        resolved = true
-        connection:Disconnect()
-        connection = nil
-    end)
-
+local function FirePromptUntilAssigned()
+    Log("Firing prompt — waiting up to " .. PROMPT_WAIT_TIMEOUT .. "s per attempt")
     local attempts = 0
-    while not resolved and attempts < MAX_PROMPT_ATTEMPTS do
-        VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.E, false, nil)
-        task.wait(PROMPT_HOLD_TIME)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, nil)
-        task.wait(PROMPT_GAP)
+
+    while attempts < MAX_PROMPT_ATTEMPTS do
         attempts += 1
+        Log("Prompt fire #" .. attempts)
+
+        local resolved   = false
+        local connection
+        connection = shelfSignal.Event:Connect(function()
+            resolved = true
+            connection:Disconnect()
+            connection = nil
+        end)
+
+        FirePromptOnce()
+
+        -- Wait up to PROMPT_WAIT_TIMEOUT for the remote to respond
+        local elapsed = 0
+        local step    = 0.05
+        while not resolved and elapsed < PROMPT_WAIT_TIMEOUT do
+            task.wait(step)
+            elapsed += step
+        end
+
+        if connection then
+            connection:Disconnect()
+            connection = nil
+        end
+
+        if resolved then
+            Log("Remote responded on attempt " .. attempts)
+            return true
+        end
+
+        Log("No response — retrying")
     end
 
-    if connection then
-        connection:Disconnect()
-        connection = nil
-    end
-
-    if not resolved then
-        Log("ShelfAssigned never fired after " .. attempts .. " attempts")
-    else
-        Log("ShelfAssigned received after " .. attempts .. " prompt(s)")
-    end
+    Log("Prompt gave up after " .. attempts .. " attempts")
+    return false
 end
 
 -- ── Shelf resolution ──────────────────────
@@ -301,6 +309,25 @@ local function UpdateCharacter()
     else
         Humanoid, HRP = nil, nil
     end
+end
+
+-- ── Closest enabled ProximityPrompt ───────
+local function GetClosestPromptPart()
+    if not HRP then return nil end
+    local best, bestDist = nil, math.huge
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") and desc.Enabled then
+            local parent = desc.Parent
+            if parent and parent:IsA("BasePart") then
+                local d = (parent.Position - HRP.Position).Magnitude
+                if d < bestDist then
+                    bestDist = d
+                    best     = parent
+                end
+            end
+        end
+    end
+    return best
 end
 
 -- ── Main loop ─────────────────────────────
@@ -332,10 +359,9 @@ local function MainLoop()
         MoveToPart(promptPart)
         task.wait(0.5)
 
-        SpamProximityPromptUntilAssigned()
-
-        if not assignedShelf then
-            Log("No shelf assigned, retrying in 3s")
+        local gotShelf = FirePromptUntilAssigned()
+        if not gotShelf or not assignedShelf then
+            Log("No shelf assigned, retrying cycle in 3s")
             task.wait(3)
             continue
         end
