@@ -1,8 +1,5 @@
--- AUTOFARM v3.12
+-- AUTOFARM v3.13
 -- fixcam → G → crowbar (dex) → crates (hold) → blueprints (hold) → packages (hold) → computer (hold) → usb (dex) → van
--- FIX: Never rises above the actual ProximityPrompt position.
---      Tween target is resolved from the prompt/attachment/part instead of the model pivot,
---      keeping the character within proximity range without going above the interaction point.
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -68,6 +65,7 @@ local guard_loop = nil
 
 local function delete_guards()
 	local police = workspace:FindFirstChild("Police")
+
 	if not police then
 		return
 	end
@@ -83,6 +81,7 @@ local function start_guard_loop()
 	delete_guards()
 
 	local police = workspace:FindFirstChild("Police")
+
 	if not police then
 		return
 	end
@@ -116,10 +115,13 @@ local function fixcam()
 		task.wait()
 	until lp.Character ~= nil
 
-	workspace.CurrentCamera.CameraSubject =
+	local humanoid =
 		lp.Character:FindFirstChildWhichIsA("Humanoid")
 
-	workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+	if workspace.CurrentCamera and humanoid then
+		workspace.CurrentCamera.CameraSubject = humanoid
+		workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+	end
 
 	lp.CameraMinZoomDistance = 0.5
 	lp.CameraMaxZoomDistance = 400
@@ -139,17 +141,8 @@ local function get_prompt_world_position(prompt)
 		return nil
 	end
 
-	local adornee = prompt.Adornee
-
-	if adornee then
-		if adornee:IsA("Attachment") then
-			return adornee.WorldPosition
-		end
-
-		if adornee:IsA("BasePart") then
-			return adornee.Position
-		end
-	end
+	-- ProximityPrompt does NOT have an Adornee property.
+	-- Resolve the position from its parent instead.
 
 	local parent = prompt.Parent
 
@@ -171,16 +164,32 @@ local function get_prompt_world_position(prompt)
 		return parent:GetPivot().Position
 	end
 
-	local part = prompt:FindFirstAncestorWhichIsA("BasePart")
+	local attachment =
+		parent:FindFirstChildWhichIsA("Attachment", true)
+
+	if attachment then
+		return attachment.WorldPosition
+	end
+
+	local part =
+		parent:FindFirstChildWhichIsA("BasePart", true)
 
 	if part then
 		return part.Position
 	end
 
-	local model = prompt:FindFirstAncestorWhichIsA("Model")
+	local ancestor_part =
+		prompt:FindFirstAncestorWhichIsA("BasePart")
 
-	if model then
-		return model:GetPivot().Position
+	if ancestor_part then
+		return ancestor_part.Position
+	end
+
+	local ancestor_model =
+		prompt:FindFirstAncestorWhichIsA("Model")
+
+	if ancestor_model then
+		return ancestor_model:GetPivot().Position
 	end
 
 	return nil
@@ -213,10 +222,15 @@ local function resolve_target_position(target)
 		return nil
 	end
 
+	if target:IsA("ProximityPrompt") then
+		return get_prompt_world_position(target)
+	end
+
 	local prompt = find_target_prompt(target)
 
 	if prompt then
-		local prompt_pos = get_prompt_world_position(prompt)
+		local prompt_pos =
+			get_prompt_world_position(prompt)
 
 		if prompt_pos then
 			return prompt_pos
@@ -258,23 +272,15 @@ local function tween_to(target)
 		return false
 	end
 
-	-- Always start below the interaction point.
-	-- Never use the model pivot as the final interaction position when a prompt exists.
 	local start_pos = hrp.Position
 
+	-- Start below target, never above it.
 	if start_pos.Y > pos.Y - 7 then
 		hrp.CFrame =
 			CFrame.new(
-				hrp.Position.X,
+				start_pos.X,
 				pos.Y - 7,
-				hrp.Position.Z
-			)
-	else
-		hrp.CFrame =
-			CFrame.new(
-				hrp.Position.X,
-				hrp.Position.Y,
-				hrp.Position.Z
+				start_pos.Z
 			)
 	end
 
@@ -314,18 +320,12 @@ local function tween_to(target)
 	tw:Play()
 	tw.Completed:Wait()
 
-	print(string.format(
-		"[TWEEN] underground pass done %.2f",
-		tick()
-	))
-
 	task.wait(0.2)
 
-	-- Re-resolve the prompt position in case the object moved.
-	local live_pos = resolve_target_position(target) or pos
+	local live_pos =
+		resolve_target_position(target) or pos
 
-	-- Stay slightly below the actual interaction point.
-	-- This avoids rising above the model/prompt and keeps proximity distance small.
+	-- Move to interaction range while remaining below prompt.
 	local near_dest =
 		CFrame.new(
 			live_pos.X,
@@ -338,12 +338,6 @@ local function tween_to(target)
 
 	local duration2 =
 		math.max(0.1, distance2 / TWEEN_SPEED)
-
-	print(string.format(
-		"[TWEEN] approaching prompt %.2f dist %.1f",
-		tick(),
-		distance2
-	))
 
 	local tw2 = TweenService:Create(
 		hrp,
@@ -359,19 +353,16 @@ local function tween_to(target)
 	tw2:Play()
 	tw2.Completed:Wait()
 
-	print(string.format(
-		"[TWEEN] prompt position reached %.2f",
-		tick()
-	))
+	task.wait(0.1)
 
-	-- Final correction stays BELOW the prompt.
-	-- No upward movement above the interaction point.
-	live_pos = resolve_target_position(target) or live_pos
+	live_pos =
+		resolve_target_position(target) or live_pos
 
+	-- Final position stays below the prompt.
 	local final_dest =
 		CFrame.new(
 			live_pos.X,
-			live_pos.Y - 1.0,
+			live_pos.Y - 1,
 			live_pos.Z
 		)
 
@@ -389,12 +380,12 @@ local function tween_to(target)
 	tw3:Play()
 	tw3.Completed:Wait()
 
+	task.wait(0.25)
+
 	print(string.format(
-		"[TWEEN] final prompt-safe position %.2f",
+		"[TWEEN] prompt-safe position %.2f",
 		tick()
 	))
-
-	task.wait(0.25)
 
 	return true
 end
@@ -481,6 +472,10 @@ end
 local function find_prompt(parent)
 	if not parent then
 		return nil
+	end
+
+	if parent:IsA("ProximityPrompt") then
+		return parent
 	end
 
 	for _, v in ipairs(parent:GetDescendants()) do
@@ -600,12 +595,14 @@ local function handle_package_gate(pkg)
 		get_closest_removable_frame(base.Position)
 
 	if rf_main then
-		tween_to(rf_main)
-
 		local rf_prompt =
 			rf_main:FindFirstChildOfClass(
 				"ProximityPrompt"
 			)
+
+		tween_to(
+			rf_prompt or rf_main
+		)
 
 		if rf_prompt then
 			print(string.format(
@@ -614,22 +611,25 @@ local function handle_package_gate(pkg)
 			))
 
 			hold_prompt(rf_prompt, 0.3)
-
 			task.wait(0.5)
 		end
 	end
 
-	local ms = get_closest_mini_safe(base.Position)
+	local ms =
+		get_closest_mini_safe(base.Position)
 
 	if ms then
-		local drill = ms:FindFirstChild("InsertDrill")
+		local drill =
+			ms:FindFirstChild("InsertDrill")
 
 		if drill then
 			local drill_prompt =
-				drill:FindFirstChild("ProximityPromptPickLock")
+				drill:FindFirstChild(
+					"ProximityPromptPickLock"
+				)
 
 			if drill_prompt then
-				tween_to(drill)
+				tween_to(drill_prompt)
 
 				print(string.format(
 					"[GATE] Firing MiniSafe at %.2f",
@@ -637,7 +637,6 @@ local function handle_package_gate(pkg)
 				))
 
 				hold_prompt(drill_prompt, 7.6)
-
 				task.wait(0.5)
 			end
 		end
@@ -656,7 +655,7 @@ task.wait(0.5)
 
 press_g()
 
--- ==================== CROWBAR (DEX) ====================
+-- ==================== CROWBAR ====================
 
 print("[FARM] Crowbar")
 
@@ -671,7 +670,8 @@ local crowbar =
 	)
 
 if crowbar then
-	local handle = crowbar:FindFirstChild("Handle")
+	local handle =
+		crowbar:FindFirstChild("Handle")
 
 	local cb_prompt =
 		handle and
@@ -680,7 +680,7 @@ if crowbar then
 		)
 
 	tween_to(
-		cb_prompt or crowbar
+		cb_prompt or handle or crowbar
 	)
 
 	local timeout = tick() + 15
@@ -690,11 +690,14 @@ if crowbar then
 		tick()
 	))
 
-	while crowbar.Parent ~= nil and tick() < timeout do
+	while crowbar.Parent ~= nil
+		and tick() < timeout do
+
 		if cb_prompt and cb_prompt.Parent then
 			dex_fire(cb_prompt)
 		else
-			handle = crowbar:FindFirstChild("Handle")
+			handle =
+				crowbar:FindFirstChild("Handle")
 
 			cb_prompt =
 				handle and
@@ -713,7 +716,7 @@ end
 
 print("[FARM] Crowbar done")
 
--- ==================== CRATES (HOLD) ====================
+-- ==================== CRATES ====================
 
 print("[FARM] RushCrates")
 
@@ -776,7 +779,7 @@ end
 
 print("[FARM] Crates done")
 
--- ==================== BLUEPRINTS (HOLD) ====================
+-- ==================== BLUEPRINTS ====================
 
 print("[FARM] Blueprints")
 
@@ -873,41 +876,49 @@ local function throw_bag()
 	task.wait(0.5)
 end
 
-local blueprints = get_blueprints()
+local blueprints =
+	get_blueprints()
 
 while #blueprints > 0 do
 	local batch = 0
 
-	while batch < 2 and #blueprints > 0 do
+	while batch < 2
+		and #blueprints > 0 do
+
 		local bp = blueprints[1]
 
 		collect_blueprint(bp)
 
 		batch = batch + 1
 
-		blueprints = get_blueprints()
+		blueprints =
+			get_blueprints()
 
 		task.wait(0.2)
 	end
 
 	throw_bag()
 
-	blueprints = get_blueprints()
+	blueprints =
+		get_blueprints()
 end
 
 print("[FARM] Blueprints done")
 
--- ==================== PACKAGES (HOLD) ====================
+-- ==================== PACKAGES ====================
 
 print("[FARM] Packages")
 
 local packages_folder =
-	workspace.Map.ObjectsOfInterest.LootStuff.Packages
+	workspace.Map.ObjectsOfInterest
+	.LootStuff.Packages
 
 local function get_packages()
 	local results = {}
 
-	for _, v in ipairs(packages_folder:GetChildren()) do
+	for _, v in ipairs(
+		packages_folder:GetChildren()
+	) do
 		if v:IsA("Model") then
 			table.insert(results, v)
 		end
@@ -916,7 +927,8 @@ local function get_packages()
 	return results
 end
 
-local pkgs = get_packages()
+local pkgs =
+	get_packages()
 
 while #pkgs > 0 do
 	local pkg = pkgs[1]
@@ -930,7 +942,8 @@ while #pkgs > 0 do
 
 	handle_package_gate(pkg)
 
-	local base = pkg:FindFirstChild("Base")
+	local base =
+		pkg:FindFirstChild("Base")
 
 	local pkg_prompt =
 		base and
@@ -938,8 +951,6 @@ while #pkgs > 0 do
 			"ProximityPrompt"
 		)
 
-	-- Use the actual package prompt position,
-	-- never the package model pivot.
 	tween_to(
 		pkg_prompt or base or pkg
 	)
@@ -956,22 +967,27 @@ while #pkgs > 0 do
 			tick()
 		))
 
-		hold_prompt(pkg_prompt, 0.6)
+		hold_prompt(
+			pkg_prompt,
+			0.6
+		)
 	end
 
 	task.wait(0.3)
 
-	pkgs = get_packages()
+	pkgs =
+		get_packages()
 end
 
 print("[FARM] Packages done")
 
--- ==================== COMPUTER (HOLD) ====================
+-- ==================== COMPUTER ====================
 
 print("[FARM] HackableComputer")
 
 local hack_model =
-	workspace.Map.ObjectsOfInterest.HackableComputer
+	workspace.Map.ObjectsOfInterest
+	.HackableComputer
 
 local hack_main =
 	hack_model.Main
@@ -981,7 +997,6 @@ local hack_prompt =
 		"ProximityPrompt"
 	)
 
--- Use prompt position instead of Main/model pivot.
 tween_to(
 	hack_prompt or hack_main
 )
@@ -991,7 +1006,8 @@ hack_prompt =
 		"ProximityPrompt"
 	)
 
-local hack_timeout = tick() + 60
+local hack_timeout =
+	tick() + 60
 
 while hack_prompt
 	and hack_prompt.Parent
@@ -1002,7 +1018,10 @@ while hack_prompt
 		tick()
 	))
 
-	hold_prompt(hack_prompt, 7.1)
+	hold_prompt(
+		hack_prompt,
+		7.1
+	)
 
 	task.wait(0.5)
 
@@ -1013,41 +1032,53 @@ while hack_prompt
 
 	local hacked =
 		workspace.Map.ObjectsOfInterest:
-		FindFirstChild("HackedComputer")
+		FindFirstChild(
+			"HackedComputer"
+		)
 
 	if hacked then
 		break
 	end
 
-	print("[HACK] Not registered, retrying...")
+	print(
+		"[HACK] Not registered, retrying..."
+	)
 end
 
-print("[FARM] Hack done — waiting 30s...")
+print(
+	"[FARM] Hack done — waiting 30s..."
+)
 
 task.wait(30)
 
--- ==================== USB (DEX) ====================
+-- ==================== USB ====================
 
 print("[FARM] USB")
 
 local function try_grab_usb()
 	local hacking_computer =
 		workspace.Map.ObjectsOfInterest:
-		FindFirstChild("HackingComputer")
+		FindFirstChild(
+			"HackingComputer"
+		)
 
 	if not hacking_computer then
 		return true
 	end
 
 	local usb_drive =
-		hacking_computer:FindFirstChild("USBDrive")
+		hacking_computer:FindFirstChild(
+			"USBDrive"
+		)
 
 	if not usb_drive then
 		return true
 	end
 
 	local usb_main =
-		usb_drive:FindFirstChild("Main")
+		usb_drive:FindFirstChild(
+			"Main"
+		)
 
 	if not usb_main then
 		return false
@@ -1062,7 +1093,6 @@ local function try_grab_usb()
 		return false
 	end
 
-	-- Use the actual USB prompt position.
 	tween_to(usb_prompt)
 
 	print(string.format(
@@ -1077,14 +1107,22 @@ local function try_grab_usb()
 	return usb_drive.Parent == nil
 end
 
-local usb_timeout = tick() + 30
+local usb_timeout =
+	tick() + 30
+
 local usb_done = false
 
-while not usb_done and tick() < usb_timeout do
-	usb_done = try_grab_usb()
+while not usb_done
+	and tick() < usb_timeout do
+
+	usb_done =
+		try_grab_usb()
 
 	if not usb_done then
-		print("[USB] Still present, retrying...")
+		print(
+			"[USB] Still present, retrying..."
+		)
+
 		task.wait(0.5)
 	end
 end
