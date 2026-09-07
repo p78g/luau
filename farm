@@ -1,7 +1,9 @@
--- AUTOFARM v3.13
+-- AUTOFARM v3.5
+-- fixcam → G → crowbar → crates → blueprints → packages → computer/usb → van
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
@@ -9,46 +11,47 @@ local lp = Players.LocalPlayer
 local char = lp.Character or lp.CharacterAdded:Wait()
 local hrp = char:WaitForChild("HumanoidRootPart")
 
-local TWEEN_SPEED = 100
+local TWEEN_SPEED = 200
 
--- ==================== CHARACTER ====================
+-- ==================== POSITION LOCK ====================
 
-local function refresh_character()
-	char = lp.Character or lp.CharacterAdded:Wait()
-	hrp = char:WaitForChild("HumanoidRootPart")
+local lock_connection = nil
+local locked_cframe = nil
+
+local function lock_position()
+	locked_cframe = hrp.CFrame
+	if lock_connection then lock_connection:Disconnect() end
+	lock_connection = RunService.Heartbeat:Connect(function()
+		if locked_cframe and hrp and hrp.Parent then
+			hrp.CFrame = locked_cframe
+		end
+	end)
 end
 
-lp.CharacterAdded:Connect(function()
-	task.wait()
-	refresh_character()
-end)
+local function unlock_position()
+	if lock_connection then
+		lock_connection:Disconnect()
+		lock_connection = nil
+	end
+	locked_cframe = nil
+end
 
 -- ==================== NOCLIP ====================
 
-local noclipping = false
-local noclip_connection
 local NOCLIP_PARTS = {}
+local noclipping = false
 
 local function start_noclip()
 	noclipping = true
-
-	if noclip_connection then
-		noclip_connection:Disconnect()
-	end
-
-	noclip_connection = RunService.Stepped:Connect(function()
-		if not noclipping then
-			return
-		end
-
-		if not char or not char.Parent then
-			return
-		end
-
-		for _, v in ipairs(char:GetDescendants()) do
-			if v:IsA("BasePart") and v.CanCollide then
-				v.CanCollide = false
-				NOCLIP_PARTS[v] = true
+	NOCLIP_PARTS = {}
+	RunService.Stepped:Connect(function()
+		if not noclipping then return end
+		if char then
+			for _, v in ipairs(char:GetDescendants()) do
+				if v:IsA("BasePart") and v.CanCollide then
+					v.CanCollide = false
+					NOCLIP_PARTS[v] = true
+				end
 			end
 		end
 	end)
@@ -56,923 +59,320 @@ end
 
 local function stop_noclip()
 	noclipping = false
-
-	if noclip_connection then
-		noclip_connection:Disconnect()
-		noclip_connection = nil
+	for v in pairs(NOCLIP_PARTS) do
+		if v and v.Parent then v.CanCollide = true end
 	end
-
-	for part in pairs(NOCLIP_PARTS) do
-		if part and part.Parent then
-			part.CanCollide = true
-		end
-	end
-
 	NOCLIP_PARTS = {}
-end
-
--- ==================== GUARDS ====================
-
-local guard_loop
-
-local function delete_guards()
-	local police = workspace:FindFirstChild("Police")
-	if not police then
-		return
-	end
-
-	for _, v in ipairs(police:GetChildren()) do
-		if v.Name == "Guard" then
-			v:Destroy()
-		end
-	end
-end
-
-local function start_guard_loop()
-	delete_guards()
-
-	local police = workspace:FindFirstChild("Police")
-	if not police then
-		return
-	end
-
-	if guard_loop then
-		guard_loop:Disconnect()
-	end
-
-	guard_loop = police.ChildAdded:Connect(function(child)
-		if child.Name == "Guard" then
-			task.wait(0.1)
-
-			if child.Parent then
-				child:Destroy()
-			end
-		end
-	end)
-end
-
-local function stop_guard_loop()
-	if guard_loop then
-		guard_loop:Disconnect()
-		guard_loop = nil
-	end
 end
 
 -- ==================== FIXCAM ====================
 
 local function fixcam()
-	repeat
-		task.wait()
-	until lp.Character
-
-	char = lp.Character
-	hrp = char:WaitForChild("HumanoidRootPart")
-
-	local humanoid = char:WaitForChild("Humanoid")
-	local camera = workspace.CurrentCamera
-
+	unlock_position()
+	workspace.CurrentCamera:remove()
 	task.wait(0.1)
-
-	camera.CameraSubject = humanoid
-	camera.CameraType = Enum.CameraType.Custom
-
+	repeat task.wait() until lp.Character ~= nil
+	workspace.CurrentCamera.CameraSubject = lp.Character:FindFirstChildWhichIsA("Humanoid")
+	workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
 	lp.CameraMinZoomDistance = 0.5
 	lp.CameraMaxZoomDistance = 400
 	lp.CameraMode = Enum.CameraMode.Classic
+	lp.Character.Head.Anchored = false
+end
 
-	local head = char:FindFirstChild("Head")
+-- ==================== TWEEN (0.5s settle baked in) ====================
 
-	if head then
-		head.Anchored = false
+local function tween_to(target)
+	unlock_position()
+
+	local pos
+	if typeof(target) == "Vector3" then
+		pos = target
+	elseif target:IsA("Model") then
+		pos = target:GetPivot().Position
+	elseif target:IsA("BasePart") then
+		pos = target.Position
 	end
+
+	local dest = CFrame.new(pos + Vector3.new(0, 0, 3))
+	local distance = (hrp.Position - pos).Magnitude
+	local duration = math.max(0.1, distance / TWEEN_SPEED)
+
+	local tw = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = dest })
+	tw:Play()
+	tw.Completed:Wait()
+	lock_position()
+	task.wait(0.5)
 end
 
 -- ==================== PRESS G ====================
 
 local function press_g()
-	vim = game:GetService("VirtualInputManager")
-	vim:SendKeyEvent(true, Enum.KeyCode.G, false, game)
-	task.wait(0.05)
-	vim:SendKeyEvent(false, Enum.KeyCode.G, false, game)
-end
-
--- ==================== TWEEN ====================
-
-local function get_target_position(target)
-	if typeof(target) == "Vector3" then
-		return target
-	end
-
-	if not target or not target:IsA("Instance") then
-		return nil
-	end
-
-	if target:IsA("BasePart") then
-		return target.Position
-	end
-
-	if target:IsA("Model") then
-		if target.PrimaryPart then
-			return target.PrimaryPart.Position
-		end
-
-		local part = target:FindFirstChildWhichIsA("BasePart", true)
-
-		if part then
-			return part.Position
-		end
-	end
-
-	return nil
-end
-
-local function tween_to(target)
-	local pos = get_target_position(target)
-
-	if not pos then
-		return false
-	end
-
-	if not hrp or not hrp.Parent then
-		refresh_character()
-	end
-
-	hrp.CFrame = CFrame.new(
-		hrp.Position - Vector3.new(0, 7, 0)
-	)
-
+	VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.G, false, game)
 	task.wait(0.1)
-
-	local underground_dest = CFrame.new(
-		pos.X,
-		pos.Y - 7,
-		pos.Z
-	)
-
-	local distance = (
-		hrp.Position -
-		underground_dest.Position
-	).Magnitude
-
-	local duration = math.max(
-		0.1,
-		distance / TWEEN_SPEED
-	)
-
-	local tw = TweenService:Create(
-		hrp,
-		TweenInfo.new(
-			duration,
-			Enum.EasingStyle.Linear
-		),
-		{
-			CFrame = underground_dest
-		}
-	)
-
-	tw:Play()
-	tw.Completed:Wait()
-
-	task.wait(0.2)
-
-	local tw2 = TweenService:Create(
-		hrp,
-		TweenInfo.new(
-			0.2,
-			Enum.EasingStyle.Linear
-		),
-		{
-			CFrame = underground_dest
-		}
-	)
-
-	tw2:Play()
-	tw2.Completed:Wait()
-
-	task.wait(0.2)
-
-	local tw3 = TweenService:Create(
-		hrp,
-		TweenInfo.new(
-			0.3,
-			Enum.EasingStyle.Linear
-		),
-		{
-			CFrame = CFrame.new(pos)
-		}
-	)
-
-	tw3:Play()
-	tw3.Completed:Wait()
-
+	VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.G, false, game)
 	task.wait(0.5)
-
-	return true
 end
 
--- ==================== DEX FIRE ====================
-
-local function dex_fire(prompt)
-	if not prompt then
-		return false
-	end
-
-	if not prompt:IsA("ProximityPrompt") then
-		return false
-	end
-
-	if not prompt.Parent then
-		return false
-	end
-
-	if typeof(fireproximityprompt) ~= "function" then
-		warn("[DEX] fireproximityprompt unavailable")
-		return false
-	end
-
-	pcall(function()
-		prompt.Enabled = true
-	end)
-
-	return pcall(function()
-		fireproximityprompt(prompt)
-	end)
-end
-
--- ==================== HOLD ====================
+-- ==================== HOLD PROMPT ====================
 
 local function hold_prompt(prompt, duration)
-	if not prompt then
-		return false
-	end
-
-	if not prompt:IsA("ProximityPrompt") then
-		return false
-	end
-
-	if not prompt.Parent then
-		return false
-	end
-
-	pcall(function()
-		prompt.Enabled = true
-	end)
-
-	task.wait(0.2)
-
-	if not prompt.Parent then
-		return false
-	end
-
-	local success = pcall(function()
-		prompt:InputHoldBegin()
-	end)
-
-	if not success then
-		return false
-	end
-
+	unlock_position()
+	prompt.Enabled = true
+	prompt:InputHoldBegin()
 	task.wait(duration)
-
-	if prompt.Parent then
-		pcall(function()
-			prompt:InputHoldEnd()
-		end)
-	end
-
-	task.wait(0.2)
-
-	return true
-end
-
--- ==================== PROMPT FINDER ====================
-
-local function find_prompt(parent, name)
-	if not parent then
-		return nil
-	end
-
-	if name then
-		local prompt = parent:FindFirstChild(name, true)
-
-		if prompt and prompt:IsA("ProximityPrompt") then
-			return prompt
-		end
-	end
-
-	return parent:FindFirstChildWhichIsA(
-		"ProximityPrompt",
-		true
-	)
-end
-
-local function wait_for_prompt(parent, timeout, name)
-	local deadline = tick() + timeout
-
-	while tick() < deadline do
-		if not parent or not parent.Parent then
-			return nil
-		end
-
-		local prompt = find_prompt(parent, name)
-
-		if prompt and prompt.Parent then
-			return prompt
-		end
-
-		task.wait(0.1)
-	end
-
-	return nil
+	prompt:InputHoldEnd()
+	lock_position()
 end
 
 -- ==================== HELPERS ====================
 
 local function get_children_named(parent, name)
 	local results = {}
-
-	if not parent then
-		return results
-	end
-
 	for _, v in ipairs(parent:GetChildren()) do
-		if v.Name == name then
-			table.insert(results, v)
-		end
+		if v.Name == name then table.insert(results, v) end
 	end
-
 	return results
 end
 
 local function pick_random(t)
-	if #t == 0 then
-		return nil
-	end
-
 	return t[math.random(1, #t)]
 end
 
 -- ==================== PACKAGE GATE ====================
 
 local BLOCKED_CF = CFrame.new(
-	-118.506042,
-	8.12099838,
-	-18.7696609,
-	-0.999999762,
-	0.000258913846,
-	-0.000604276371,
-	0.000259018154,
-	0.99999994,
-	-0.000172565764,
-	0.000604231667,
-	-0.000172722255,
-	-0.999999762
+	-118.506042, 8.12099838, -18.7696609,
+	-0.999999762, 0.000258913846, -0.000604276371,
+	0.000259018154, 0.99999994,   -0.000172565764,
+	0.000604231667, -0.000172722255, -0.999999762
 )
 
-local function is_package_blocked(base)
-	if not base or not base:IsA("BasePart") then
-		return false
-	end
-
-	return (
-		base.Position -
-		BLOCKED_CF.Position
-	).Magnitude < 1
+local function is_package_blocked(pkg_base)
+	return (pkg_base.CFrame.Position - BLOCKED_CF.Position).Magnitude < 1.0
 end
 
 local function get_closest_removable_frame(ref_pos)
-	local folder = workspace:FindFirstChild(
-		"CollectableHighlights"
-	)
-
-	if not folder then
-		return nil
-	end
-
-	local best
-	local best_dist = math.huge
-
-	for _, v in ipairs(folder:GetChildren()) do
+	local best, best_dist = nil, math.huge
+	for _, v in ipairs(workspace.CollectableHighlights:GetChildren()) do
 		if v.Name == "RemovableFrame" then
 			local main = v:FindFirstChild("Main")
-
 			if main and main:IsA("BasePart") then
-				local dist = (
-					main.Position -
-					ref_pos
-				).Magnitude
-
-				if dist < best_dist then
+				local d = (main.Position - ref_pos).Magnitude
+				if d < best_dist then
+					best_dist = d
 					best = main
-					best_dist = dist
 				end
 			end
 		end
 	end
-
-	if best and best_dist < 30 then
-		return best
-	end
-
+	if best and best_dist < 30 then return best end
 	return nil
 end
 
 local function get_closest_mini_safe(ref_pos)
-	local map = workspace:FindFirstChild("Map")
-
-	if not map then
-		return nil
-	end
-
-	local best
-	local best_dist = math.huge
-
-	for _, child in ipairs(map:GetChildren()) do
+	local best, best_dist = nil, math.huge
+	for _, child in ipairs(workspace.Map:GetChildren()) do
 		local ms = child:FindFirstChild("MiniSafe")
-
 		if ms then
 			local door = ms:FindFirstChild("Door")
-
 			if door and door:IsA("BasePart") then
-				local dist = (
-					door.Position -
-					ref_pos
-				).Magnitude
-
-				if dist < best_dist then
+				local d = (door.Position - ref_pos).Magnitude
+				if d < best_dist then
+					best_dist = d
 					best = ms
-					best_dist = dist
 				end
 			end
 		end
 	end
-
-	if best and best_dist < 30 then
-		return best
-	end
-
+	if best and best_dist < 30 then return best end
 	return nil
 end
 
 local function handle_package_gate(pkg)
-	local base = pkg and pkg:FindFirstChild("Base")
+	local base = pkg:FindFirstChild("Base")
+	if not base or not is_package_blocked(base) then return end
 
-	if not base or not is_package_blocked(base) then
-		return
-	end
+	print("[FARM] Package blocked — clearing frame then safe")
 
-	local rf_main = get_closest_removable_frame(
-		base.Position
-	)
-
+	local rf_main = get_closest_removable_frame(base.Position)
 	if rf_main then
 		tween_to(rf_main)
-
-		task.wait(0.3)
-
-		local rf_prompt = wait_for_prompt(
-			rf_main,
-			3
-		)
-
+		local rf_prompt = rf_main:FindFirstChildOfClass("ProximityPrompt")
 		if rf_prompt then
-			hold_prompt(
-				rf_prompt,
-				0.3
-			)
-
+			hold_prompt(rf_prompt, 0.3)
 			task.wait(0.5)
+		else
+			warn("[FARM] RemovableFrame has no ProximityPrompt")
 		end
+	else
+		warn("[FARM] No RemovableFrame within 30 studs of package")
 	end
 
-	local ms = get_closest_mini_safe(
-		base.Position
-	)
-
+	local ms = get_closest_mini_safe(base.Position)
 	if ms then
-		local drill = ms:FindFirstChild(
-			"InsertDrill",
-			true
-		)
-
+		local drill = ms:FindFirstChild("InsertDrill")
 		if drill then
-			local drill_prompt = wait_for_prompt(
-				drill,
-				3,
-				"ProximityPromptPickLock"
-			)
-
+			local drill_prompt = drill:FindFirstChild("ProximityPromptPickLock")
 			if drill_prompt then
 				tween_to(drill)
-
-				task.wait(0.3)
-
-				hold_prompt(
-					drill_prompt,
-					7.6
-				)
-
+				hold_prompt(drill_prompt, 7.6)
 				task.wait(0.5)
+			else
+				warn("[FARM] InsertDrill has no ProximityPromptPickLock")
 			end
 		end
+	else
+		warn("[FARM] No MiniSafe within 30 studs of package")
 	end
 end
 
 -- ==================== START ====================
 
 print("[FARM] Init")
-
 start_noclip()
-start_guard_loop()
-
--- MUST RUN FIXCAM BEFORE G
 fixcam()
-
-task.wait(0.5)
-
--- EXACT WORKING G CODE
-vim = game:GetService("VirtualInputManager")
-vim:SendKeyEvent(true, Enum.KeyCode.G, false, game)
-task.wait(0.05)
-vim:SendKeyEvent(false, Enum.KeyCode.G, false, game)
-
-task.wait(0.5)
+task.wait(0.3)
+press_g()
 
 -- ==================== CROWBAR ====================
 
 print("[FARM] Crowbar")
 
-local collectables = workspace:FindFirstChild(
-	"CollectableHighlights"
-)
-
-local crowbar = collectables and
-	collectables:FindFirstChild("Crowbar")
+local crowbar = workspace.CollectableHighlights:WaitForChild("Crowbar", 10)
 
 if crowbar then
 	tween_to(crowbar)
 
-	task.wait(0.5)
+	local cb_prompt = crowbar.Handle:FindFirstChildOfClass("ProximityPrompt")
+	local timeout = tick() + 15
 
-	local handle = crowbar:FindFirstChild(
-		"Handle",
-		true
-	)
-
-	local cb_prompt
-
-	if handle then
-		cb_prompt = wait_for_prompt(
-			handle,
-			5
-		)
-	end
-
-	if not cb_prompt then
-		cb_prompt = wait_for_prompt(
-			crowbar,
-			5
-		)
-	end
-
-	if cb_prompt then
-		local timeout = tick() + 15
-
-		while crowbar.Parent
-			and cb_prompt.Parent
-			and tick() < timeout do
-
-			dex_fire(cb_prompt)
-
-			task.wait(0.2)
+	while crowbar.Parent ~= nil and tick() < timeout do
+		if cb_prompt and cb_prompt.Parent then
+			hold_prompt(cb_prompt, 0.3)
 		end
-	else
-		warn("[CROWBAR] Prompt not found")
+		task.wait(0.2)
 	end
+
+	task.wait(0.3)
 else
-	warn("[FARM] Crowbar not found")
+	warn("[FARM] No Crowbar found")
 end
 
-task.wait(0.5)
+print("[FARM] Crowbar done")
 
 -- ==================== CRATES ====================
 
 print("[FARM] RushCrates")
 
 local function get_crates()
-	local folder = workspace:FindFirstChild(
-		"CollectableHighlights"
-	)
-
-	if not folder then
-		return {}
-	end
-
-	return get_children_named(
-		folder,
-		"RushCrate"
-	)
+	return get_children_named(workspace.CollectableHighlights, "RushCrate")
 end
 
 local crates = get_crates()
-
 while #crates > 0 do
 	local crate = pick_random(crates)
-
-	if crate and crate.Parent then
-		tween_to(crate)
-
-		task.wait(0.4)
-
-		local spacer = crate:FindFirstChild(
-			"Spacer",
-			true
-		)
-
-		local prompt = spacer and wait_for_prompt(
-			spacer,
-			4,
-			"ProximityPrompt"
-		)
-
-		if prompt then
-			hold_prompt(
-				prompt,
-				2.6
-			)
-		end
-	end
-
+	print("[FARM] Crate: " .. crate:GetFullName())
+	tween_to(crate)
+	local sp = crate.Spacer:FindFirstChildOfClass("ProximityPrompt")
+	hold_prompt(sp, 2.6)
 	task.wait(0.3)
-
 	crates = get_crates()
 end
+
+print("[FARM] Crates done")
 
 -- ==================== BLUEPRINTS ====================
 
 print("[FARM] Blueprints")
 
-local rs_package = ReplicatedStorage:FindFirstChild(
-	"RS_Package"
-)
-
-local remotes = rs_package and
-		rs_package:FindFirstChild("Remotes")
-
-local throw_event = remotes and
-	throw_event or remotes and remotes:FindFirstChild(
-		"ThrowBag"
-	)
-
-local bag_area = workspace:FindFirstChild(
-	"BagSecuredArea"
-)
-
-local floor_part = bag_area and
-	bag_area:FindFirstChild("FloorPart")
+local throw_event = ReplicatedStorage.RS_Package.Remotes.ThrowBag
+local floor_part = workspace.BagSecuredArea.FloorPart
 
 local function get_blueprints()
-	local folder = workspace:FindFirstChild(
-		"CollectableHighlights"
-	)
-
-	if not folder then
-		return {}
-	end
-
-	return get_children_named(
-		folder,
-		"Blueprint"
-	)
+	return get_children_named(workspace.CollectableHighlights, "Blueprint")
 end
 
 local function collect_blueprint(bp)
-	if not bp or not bp.Parent then
-		return false
-	end
-
 	tween_to(bp)
-
-	-- Give the character time to actually arrive
-	task.wait(0.7)
-
-	local prompt = wait_for_prompt(
-		bp,
-		5,
-		"ProximityPrompt"
-	)
-
-	if not prompt then
-		warn("[BP] Prompt not found")
-		return false
-	end
-
-	-- Wait for prompt to become usable before firing
-	local enable_deadline = tick() + 3
-
-	while prompt.Parent
-		and not prompt.Enabled
-		and tick() < enable_deadline do
-
-		task.wait(0.1)
-	end
-
-	if not prompt.Parent then
-		return false
-	end
-
-	-- Extra delay prevents firing before the blueprint interaction registers
-	task.wait(0.5)
-
-	hold_prompt(
-		prompt,
-		2.1
-	)
-
-	task.wait(0.6)
-
-	return true
+	local bp_prompt = bp.Blueprint:FindFirstChildOfClass("ProximityPrompt")
+	hold_prompt(bp_prompt, 2.1)
+	task.wait(0.3)
 end
 
 local function throw_bag()
-	if not floor_part or not floor_part.Parent then
-		return false
-	end
-
 	tween_to(floor_part)
-
-	task.wait(0.7)
-
-	if throw_event and throw_event:IsA("RemoteEvent") then
-		throw_event:FireServer(
-			Vector3.new(
-				-0.5045884847641,
-				0.37638658285141,
-				-0.77699649333954
-			)
-		)
-	end
-
-	task.wait(0.7)
-
-	return true
+	throw_event:FireServer(
+		Vector3.new(-0.5045884847641, 0.37638658285141, -0.77699649333954)
+	)
+	task.wait(0.5)
 end
 
 local blueprints = get_blueprints()
-
 while #blueprints > 0 do
 	local batch = 0
-
 	while batch < 2 and #blueprints > 0 do
-		local bp = blueprints[1]
-
-		if bp and bp.Parent then
-			collect_blueprint(bp)
-		end
-
-		batch += 1
-
-		task.wait(0.5)
-
+		collect_blueprint(blueprints[1])
+		batch = batch + 1
 		blueprints = get_blueprints()
 	end
-
-	if batch > 0 then
-		throw_bag()
-	end
-
-	task.wait(0.5)
-
+	throw_bag()
 	blueprints = get_blueprints()
 end
+
+print("[FARM] Blueprints done")
 
 -- ==================== PACKAGES ====================
 
 print("[FARM] Packages")
 
-local map = workspace:FindFirstChild("Map")
-local objects = map and
-		map:FindFirstChild("ObjectsOfInterest")
-
-local loot = objects and
-	objects:FindFirstChild("LootStuff")
-
-local packages_folder = loot and
-	loot:FindFirstChild("Packages")
+local packages_folder = workspace.Map.ObjectsOfInterest.LootStuff.Packages
 
 local function get_packages()
 	local results = {}
-
-	if not packages_folder then
-		return results
-	end
-
 	for _, v in ipairs(packages_folder:GetChildren()) do
-		if v:IsA("Model") then
-			table.insert(results, v)
-		end
+		if v:IsA("Model") then table.insert(results, v) end
 	end
-
 	return results
 end
 
 local pkgs = get_packages()
-
 while #pkgs > 0 do
 	local pkg = pkgs[1]
-
-	if pkg and pkg.Parent then
-		handle_package_gate(pkg)
-
-		local base = pkg:FindFirstChild("Base")
-
-		if base then
-			tween_to(base)
-
-			task.wait(0.5)
-
-			local prompt = wait_for_prompt(
-				base,
-				4,
-				"ProximityPrompt"
-			)
-
-			if prompt then
-				hold_prompt(
-					prompt,
-					0.6
-				)
-			end
-		end
-	end
-
+	print("[FARM] Package: " .. pkg.Name)
+	handle_package_gate(pkg)
+	tween_to(pkg)
+	local pkg_prompt = pkg.Base:FindFirstChildOfClass("ProximityPrompt")
+	if pkg_prompt then hold_prompt(pkg_prompt, 0.6) end
 	task.wait(0.3)
-
 	pkgs = get_packages()
 end
+
+print("[FARM] Packages done")
 
 -- ==================== COMPUTER ====================
 
 print("[FARM] HackableComputer")
 
-map = workspace:FindFirstChild("Map")
-objects = map and
-		map:FindFirstChild("ObjectsOfInterest")
+local hack_model = workspace.Map.ObjectsOfInterest.HackableComputer
+local hack_main = hack_model.Main
+tween_to(hack_main)
 
-local hack_model = objects and
-	objects:FindFirstChild("HackableComputer")
+local hack_prompt = hack_main:FindFirstChildOfClass("ProximityPrompt")
+local hack_timeout = tick() + 60
 
-if hack_model then
-	local hack_main = hack_model:FindFirstChild(
-		"Main",
-		true
-	)
-
-	if hack_main then
-		tween_to(hack_main)
-
-		task.wait(0.7)
-
-		local hack_prompt = wait_for_prompt(
-			hack_main,
-			5
-		)
-
-		if hack_prompt then
-			local timeout = tick() + 60
-
-			while hack_prompt.Parent
-				and tick() < timeout do
-
-				hold_prompt(
-					hack_prompt,
-					7.1
-				)
-
-				task.wait(0.5)
-
-				local hacked = objects:FindFirstChild(
-					"HackedComputer"
-				)
-
-				if hacked then
-					break
-				end
-
-				if not hack_prompt.Parent then
-					break
-				end
-
-				if not hack_prompt.Enabled then
-					break
-				end
-			end
-		end
+while hack_prompt and hack_prompt.Parent and tick() < hack_timeout do
+	hold_prompt(hack_prompt, 7.1)
+	task.wait(0.5)
+	if not hack_prompt.Parent or not hack_prompt.Enabled then
+		break
 	end
+	local hacked = workspace.Map.ObjectsOfInterest:FindFirstChild("HackedComputer")
+	if hacked then break end
+	print("[FARM] Hack not registered, retrying...")
 end
 
-print("[FARM] Hack done")
-
+print("[FARM] Hack done — waiting 30s...")
 task.wait(30)
 
 -- ==================== USB ====================
@@ -980,78 +380,39 @@ task.wait(30)
 print("[FARM] USB")
 
 local function try_grab_usb()
-	map = workspace:FindFirstChild("Map")
+	local usb_drive = workspace.Map.ObjectsOfInterest.HackingComputer:FindFirstChild("USBDrive")
+	if not usb_drive then return true end
 
-	objects = map and
-		workspace.Map:FindFirstChild(
-			"ObjectsOfInterest"
-		)
+	local usb_main = usb_drive:FindFirstChild("Main")
+	if not usb_main then return false end
 
-	local hacking_computer = objects and
-		objects:FindFirstChild(
-			"HackingComputer"
-		)
+	local usb_prompt = usb_main:FindFirstChildOfClass("ProximityPrompt")
+	if not usb_prompt then return false end
 
-	local usb_drive = hacking_computer and
-		hacking_computer:FindFirstChild(
-			"USBDrive"
-		)
-
-	if not usb_drive then
-		return true
-	end
-
-	local usb_main = usb_drive:FindFirstChild(
-		"Main",
-		true
-	)
-
-	if not usb_main then
-		return false
-	end
-
-	tween_to(usb_main)
-
-	task.wait(0.7)
-
-	local usb_prompt = wait_for_prompt(
-		usb_main,
-		5
-	)
-
-	if not usb_prompt then
-		return false
-	end
-
-	dex_fire(usb_prompt)
-
+	hold_prompt(usb_prompt, 0.3)
 	task.wait(1)
 
 	return usb_drive.Parent == nil
 end
 
-local usb_done = false
 local usb_timeout = tick() + 30
+local usb_done = false
 
-while not usb_done
-	and tick() < usb_timeout do
-
+while not usb_done and tick() < usb_timeout do
 	usb_done = try_grab_usb()
-
 	if not usb_done then
+		print("[FARM] USB still present, retrying...")
 		task.wait(0.5)
 	end
 end
 
--- ==================== VAN ====================
+print("[FARM] USB done")
 
-print("[FARM] Drop zone")
+-- ==================== VAN / DROP ZONE ====================
 
-if floor_part and floor_part.Parent then
-	tween_to(floor_part)
-end
+print("[FARM] Tweening to van drop zone")
+tween_to(floor_part)
 
 stop_noclip()
-stop_guard_loop()
-
-print("[FARM] Run complete")
+unlock_position()
+print("[FARM] Run complete.")
